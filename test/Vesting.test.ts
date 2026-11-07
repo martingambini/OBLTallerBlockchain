@@ -323,3 +323,250 @@ test("Debe permitir reclamos parciales y evitar dobles retiros", async () => {
   const vestingBalance = await token.read.balanceOf([vesting.address]);
   assert.equal(vestingBalance, 0n);
 });
+
+const DAY = 24n * 60n * 60n;
+
+async function setupAgreement(
+  opts: { amount?: bigint; duration?: bigint; revocable?: boolean } = {},
+) {
+  const amount = opts.amount ?? parseUnits("3000", 18);
+  const duration = opts.duration ?? 30n * DAY;
+  const revocable = opts.revocable ?? true;
+
+  const { viem } = await network.connect();
+  const [payer, beneficiary, stranger] = await viem.getWalletClients();
+  const publicClient = await viem.getPublicClient();
+  const testClient = await viem.getTestClient();
+
+  const token = await viem.deployContract("MockToken");
+  const vesting = await viem.deployContract("Vesting");
+
+  const block = await publicClient.getBlock();
+  const startTime = block.timestamp + 3600n;
+  const endTime = startTime + duration;
+
+  await token.write.approve([vesting.address, amount]);
+  await vesting.write.createAgreement([
+    beneficiary.account.address,
+    token.address,
+    amount,
+    startTime,
+    endTime,
+    revocable,
+  ]);
+
+  return {
+    payer,
+    beneficiary,
+    stranger,
+    publicClient,
+    testClient,
+    token,
+    vesting,
+    amount,
+    duration,
+    startTime,
+    endTime,
+  };
+}
+
+test("Cancelación válida: devuelve lo no devengado al pagador y congela lo devengado", async () => {
+  const s = await setupAgreement();
+  const half = s.amount / 2n;
+
+  const payerBefore = await s.token.read.balanceOf([s.payer.account.address]);
+
+  await s.testClient.setNextBlockTimestamp({
+    timestamp: s.startTime + s.duration / 2n,
+  });
+  const hash = await s.vesting.write.cancel([0n]);
+  const receipt = await s.publicClient.waitForTransactionReceipt({ hash });
+
+  const payerAfter = await s.token.read.balanceOf([s.payer.account.address]);
+  assert.equal(payerAfter - payerBefore, half);
+
+  assert.equal(await s.token.read.balanceOf([s.vesting.address]), half);
+
+  const agreement = await s.vesting.read.agreements([0n]);
+  assert.equal(agreement[8], 2); // Status.Cancelled
+  assert.equal(agreement[9], half); // vestedAtCancel
+
+  const events = await s.vesting.getEvents.AgreementCancelled(
+    {},
+    { fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber },
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0].args.agreementId, 0n);
+  assert.equal(
+    events[0].args.payer?.toLowerCase(),
+    s.payer.account.address.toLowerCase(),
+  );
+  assert.equal(events[0].args.vestedAmount, half);
+  assert.equal(events[0].args.refundedAmount, half);
+});
+
+test("Tras cancelar, el beneficiario reclama lo devengado y el devengado ya no crece", async () => {
+  const s = await setupAgreement();
+  const half = s.amount / 2n;
+
+  await s.testClient.setNextBlockTimestamp({
+    timestamp: s.startTime + s.duration / 2n,
+  });
+  await s.vesting.write.cancel([0n]);
+
+  await s.testClient.setNextBlockTimestamp({
+    timestamp: s.endTime + DAY,
+  });
+  await s.testClient.mine({ blocks: 1 });
+
+  assert.equal(await s.vesting.read.vestedAmount([0n]), half);
+  assert.equal(await s.vesting.read.claimableAmount([0n]), half);
+
+  await s.vesting.write.claim([0n], { account: s.beneficiary.account });
+
+  assert.equal(
+    await s.token.read.balanceOf([s.beneficiary.account.address]),
+    half,
+  );
+  const agreement = await s.vesting.read.agreements([0n]);
+  assert.equal(agreement[8], 2);
+  assert.equal(agreement[6], half); // claimedAmount
+
+  assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
+
+  await assert.rejects(
+    s.vesting.write.claim([0n], { account: s.beneficiary.account }),
+    /NothingToClaim/,
+  );
+});
+
+test("Cancelar después de un reclamo parcial respeta lo ya retirado", async () => {
+  const s = await setupAgreement();
+
+  await s.testClient.setNextBlockTimestamp({
+    timestamp: s.startTime + s.duration / 4n,
+  });
+  await s.vesting.write.claim([0n], { account: s.beneficiary.account });
+  const quarter = parseUnits("750", 18);
+  assert.equal(
+    await s.token.read.balanceOf([s.beneficiary.account.address]),
+    quarter,
+  );
+
+  await s.testClient.setNextBlockTimestamp({
+    timestamp: s.startTime + s.duration / 2n,
+  });
+  await s.vesting.write.cancel([0n]);
+
+  assert.equal(await s.vesting.read.claimableAmount([0n]), quarter);
+
+  await s.vesting.write.claim([0n], { account: s.beneficiary.account });
+  assert.equal(
+    await s.token.read.balanceOf([s.beneficiary.account.address]),
+    parseUnits("1500", 18),
+  );
+  assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
+});
+
+test("Cancelar antes del inicio devuelve todo al pagador", async () => {
+  const s = await setupAgreement();
+
+  const payerBefore = await s.token.read.balanceOf([s.payer.account.address]);
+
+  await s.testClient.setNextBlockTimestamp({ timestamp: s.startTime - 10n });
+  await s.vesting.write.cancel([0n]);
+
+  const payerAfter = await s.token.read.balanceOf([s.payer.account.address]);
+  assert.equal(payerAfter - payerBefore, s.amount);
+  assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
+  assert.equal(await s.vesting.read.vestedAmount([0n]), 0n);
+
+  await assert.rejects(
+    s.vesting.write.claim([0n], { account: s.beneficiary.account }),
+    /NothingToClaim/,
+  );
+});
+
+test("Redondeo al cancelar: reclamado + devuelto = depositado, sin retirar de más", async () => {
+  const s = await setupAgreement({ amount: 100n, duration: 3n });
+
+  await s.testClient.setNextBlockTimestamp({ timestamp: s.startTime + 1n });
+  const payerBefore = await s.token.read.balanceOf([s.payer.account.address]);
+  await s.vesting.write.cancel([0n]);
+
+  const refund =
+    (await s.token.read.balanceOf([s.payer.account.address])) - payerBefore;
+  assert.equal(refund, 67n); // el redondeo favorece al pagador, nunca al beneficiario
+  assert.equal(await s.vesting.read.vestedAmount([0n]), 33n);
+
+  await s.vesting.write.claim([0n], { account: s.beneficiary.account });
+  const claimed = await s.token.read.balanceOf([s.beneficiary.account.address]);
+  assert.equal(claimed, 33n);
+
+  assert.equal(claimed + refund, s.amount);
+  assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
+});
+
+test("Solo el pagador puede cancelar", async () => {
+  const s = await setupAgreement();
+
+  await s.testClient.setNextBlockTimestamp({
+    timestamp: s.startTime + s.duration / 2n,
+  });
+
+  await assert.rejects(
+    s.vesting.write.cancel([0n], { account: s.beneficiary.account }),
+    /Unauthorized/,
+  );
+
+  await assert.rejects(
+    s.vesting.write.cancel([0n], { account: s.stranger.account }),
+    /Unauthorized/,
+  );
+
+  const agreement = await s.vesting.read.agreements([0n]);
+  assert.equal(agreement[8], 0); // sigue Active
+});
+
+test("No se puede cancelar un acuerdo no revocable", async () => {
+  const s = await setupAgreement({ revocable: false });
+
+  await s.testClient.setNextBlockTimestamp({
+    timestamp: s.startTime + s.duration / 2n,
+  });
+
+  await assert.rejects(s.vesting.write.cancel([0n]), /NotRevocable/);
+
+  const agreement = await s.vesting.read.agreements([0n]);
+  assert.equal(agreement[8], 0); // sigue Active
+  assert.equal(await s.token.read.balanceOf([s.vesting.address]), s.amount);
+});
+
+test("No se puede cancelar dos veces", async () => {
+  const s = await setupAgreement();
+
+  await s.testClient.setNextBlockTimestamp({
+    timestamp: s.startTime + s.duration / 2n,
+  });
+  await s.vesting.write.cancel([0n]);
+
+  await assert.rejects(s.vesting.write.cancel([0n]), /AgreementNotActive/);
+});
+
+test("No se puede cancelar cuando el período ya terminó", async () => {
+  const s = await setupAgreement();
+
+  await s.testClient.setNextBlockTimestamp({ timestamp: s.endTime });
+
+  await assert.rejects(s.vesting.write.cancel([0n]), /VestingAlreadyEnded/);
+
+  await s.testClient.setNextBlockTimestamp({ timestamp: s.endTime + 1n });
+  await s.testClient.mine({ blocks: 1 });
+  assert.equal(await s.vesting.read.claimableAmount([0n]), s.amount);
+});
+
+test("No se puede cancelar un acuerdo inexistente", async () => {
+  const s = await setupAgreement();
+
+  await assert.rejects(s.vesting.write.cancel([99n]), /AgreementNotFound/);
+});
