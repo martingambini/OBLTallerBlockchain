@@ -1,62 +1,29 @@
-
- // SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./IVesting.sol";
 
-contract Vesting is ReentrancyGuard {
+contract Vesting is IVesting, ReentrancyGuard {
     using SafeERC20 for IERC20;
-
-    enum Status {
-        Active,
-        Completed,
-        Cancelled
-    }
-
-    struct Agreement {
-        address payer;
-        address beneficiary;
-        IERC20 token;
-        uint256 totalAmount;
-        uint256 startTime;
-        uint256 endTime;
-        uint256 claimedAmount;
-        bool revocable;
-        Status status;
-        uint256 vestedAtCancel;
-    }
 
     uint256 public nextAgreementId;
 
-    mapping(uint256 => Agreement) public agreements;
-
-    event AgreementCreated(
-        uint256 indexed agreementId,
-        address indexed payer,
-        address indexed beneficiary,
-        address token,
-        uint256 totalAmount,
-        uint256 startTime,
-        uint256 endTime,
-        bool revocable
-    );
-
-    error InvalidBeneficiary();
-    error InvalidToken();
-    error InvalidAmount();
-    error InvalidTimeRange();
+    mapping(uint256 => Agreement) private _agreements;
+    mapping(address => uint256[]) private _agreementIdsByPayer;
+    mapping(address => uint256[]) private _agreementIdsByBeneficiary;
 
     function createAgreement(
         address beneficiary,
         address token,
         uint256 totalAmount,
         uint256 startTime,
+        uint256 cliffTime,
         uint256 endTime,
         bool revocable
     ) external nonReentrant returns (uint256 agreementId) {
-
         if (beneficiary == address(0)) {
             revert InvalidBeneficiary();
         }
@@ -69,31 +36,46 @@ contract Vesting is ReentrancyGuard {
             revert InvalidAmount();
         }
 
-        if (endTime <= startTime) {
+        if (totalAmount > type(uint128).max) {
+            revert AmountTooLarge();
+        }
+
+        if (endTime <= startTime || endTime > type(uint48).max) {
             revert InvalidTimeRange();
         }
 
-        agreementId = nextAgreementId;
-        nextAgreementId++;
+        if (cliffTime < startTime || cliffTime > endTime) {
+            revert InvalidCliff();
+        }
 
-        agreements[agreementId] = Agreement({
+        agreementId = nextAgreementId;
+        nextAgreementId = agreementId + 1;
+
+        _agreements[agreementId] = Agreement({
             payer: msg.sender,
+            startTime: uint48(startTime),
+            endTime: uint48(endTime),
             beneficiary: beneficiary,
-            token: IERC20(token),
-            totalAmount: totalAmount,
-            startTime: startTime,
-            endTime: endTime,
-            claimedAmount: 0,
+            cliffTime: uint48(cliffTime),
             revocable: revocable,
             status: Status.Active,
+            token: token,
+            totalAmount: uint128(totalAmount),
+            claimedAmount: 0,
             vestedAtCancel: 0
         });
 
-        IERC20(token).safeTransferFrom(
-            msg.sender,
-            address(this),
-            totalAmount
-        );
+        _agreementIdsByPayer[msg.sender].push(agreementId);
+        _agreementIdsByBeneficiary[beneficiary].push(agreementId);
+
+        IERC20 erc20 = IERC20(token);
+        uint256 balanceBefore = erc20.balanceOf(address(this));
+
+        erc20.safeTransferFrom(msg.sender, address(this), totalAmount);
+
+        if (erc20.balanceOf(address(this)) - balanceBefore != totalAmount) {
+            revert UnsupportedToken();
+        }
 
         emit AgreementCreated(
             agreementId,
@@ -102,6 +84,7 @@ contract Vesting is ReentrancyGuard {
             token,
             totalAmount,
             startTime,
+            cliffTime,
             endTime,
             revocable
         );
@@ -110,12 +93,11 @@ contract Vesting is ReentrancyGuard {
     function vestedAmount(
         uint256 agreementId
     ) public view returns (uint256) {
-        require(
-            agreementId < nextAgreementId,
-            "Agreement does not exist"
-        );
+        if (agreementId >= nextAgreementId) {
+            revert AgreementNotFound();
+        }
 
-        Agreement storage agreement = agreements[agreementId];
+        Agreement storage agreement = _agreements[agreementId];
 
         if (agreement.status == Status.Cancelled) {
             return agreement.vestedAtCancel;
@@ -123,7 +105,7 @@ contract Vesting is ReentrancyGuard {
 
         uint256 currentTime = block.timestamp;
 
-        if (currentTime <= agreement.startTime) {
+        if (currentTime < agreement.cliffTime) {
             return 0;
         }
 
@@ -131,50 +113,29 @@ contract Vesting is ReentrancyGuard {
             return agreement.totalAmount;
         }
 
-        uint256 elapsedTime =
-            currentTime - agreement.startTime;
+        uint256 elapsedTime = currentTime - agreement.startTime;
+        uint256 duration = agreement.endTime - agreement.startTime;
 
-        uint256 duration =
-            agreement.endTime - agreement.startTime;
-
-        return (
-            agreement.totalAmount * elapsedTime
-        ) / duration;
+        return (uint256(agreement.totalAmount) * elapsedTime) / duration;
     }
 
     function claimableAmount(
         uint256 agreementId
     ) public view returns (uint256) {
-        Agreement storage agreement = agreements[agreementId];
-
         return vestedAmount(agreementId)
-            - agreement.claimedAmount;
+            - _agreements[agreementId].claimedAmount;
     }
-
-
-    event TokensClaimed(
-        uint256 indexed agreementId,
-        address indexed beneficiary,
-        uint256 amount
-    );
-
-    error AgreementNotFound();
-    error Unauthorized();
-    error NothingToClaim();
-    error AgreementCompleted();
 
     function claim(uint256 agreementId) external nonReentrant {
         if (agreementId >= nextAgreementId) {
             revert AgreementNotFound();
         }
 
-        Agreement storage agreement = agreements[agreementId];
-
+        Agreement storage agreement = _agreements[agreementId];
 
         if (msg.sender != agreement.beneficiary) {
             revert Unauthorized();
         }
-
 
         if (agreement.status == Status.Completed) {
             revert AgreementCompleted();
@@ -187,8 +148,7 @@ contract Vesting is ReentrancyGuard {
         }
 
         // Actualizar el estado ANTES de transferir
-        agreement.claimedAmount += amount;
-
+        agreement.claimedAmount += uint128(amount);
 
         if (
             agreement.status == Status.Active &&
@@ -198,36 +158,17 @@ contract Vesting is ReentrancyGuard {
             agreement.status = Status.Completed;
         }
 
+        IERC20(agreement.token).safeTransfer(agreement.beneficiary, amount);
 
-        agreement.token.safeTransfer(
-            agreement.beneficiary,
-            amount
-        );
-
-        emit TokensClaimed(
-            agreementId,
-            agreement.beneficiary,
-            amount
-        );
+        emit TokensClaimed(agreementId, agreement.beneficiary, amount);
     }
-
-    event AgreementCancelled(
-        uint256 indexed agreementId,
-        address indexed payer,
-        uint256 vestedAmount,
-        uint256 refundedAmount
-    );
-
-    error NotRevocable();
-    error AgreementNotActive();
-    error VestingAlreadyEnded();
 
     function cancel(uint256 agreementId) external nonReentrant {
         if (agreementId >= nextAgreementId) {
             revert AgreementNotFound();
         }
 
-        Agreement storage agreement = agreements[agreementId];
+        Agreement storage agreement = _agreements[agreementId];
 
         if (msg.sender != agreement.payer) {
             revert Unauthorized();
@@ -249,12 +190,70 @@ contract Vesting is ReentrancyGuard {
 
         uint256 refund = agreement.totalAmount - vested;
 
-        agreement.vestedAtCancel = vested;
+        agreement.vestedAtCancel = uint128(vested);
         agreement.status = Status.Cancelled;
 
-        agreement.token.safeTransfer(agreement.payer, refund);
+        IERC20(agreement.token).safeTransfer(agreement.payer, refund);
 
         emit AgreementCancelled(agreementId, agreement.payer, vested, refund);
     }
 
+    function getAgreement(
+        uint256 agreementId
+    ) external view returns (Agreement memory) {
+        if (agreementId >= nextAgreementId) {
+            revert AgreementNotFound();
+        }
+
+        return _agreements[agreementId];
+    }
+
+    function agreementCountByPayer(
+        address payer
+    ) external view returns (uint256) {
+        return _agreementIdsByPayer[payer].length;
+    }
+
+    function agreementCountByBeneficiary(
+        address beneficiary
+    ) external view returns (uint256) {
+        return _agreementIdsByBeneficiary[beneficiary].length;
+    }
+
+    function getAgreementIdsByPayer(
+        address payer,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (uint256[] memory) {
+        return _page(_agreementIdsByPayer[payer], offset, limit);
+    }
+
+    function getAgreementIdsByBeneficiary(
+        address beneficiary,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (uint256[] memory) {
+        return _page(_agreementIdsByBeneficiary[beneficiary], offset, limit);
+    }
+
+    function _page(
+        uint256[] storage ids,
+        uint256 offset,
+        uint256 limit
+    ) private view returns (uint256[] memory page) {
+        uint256 total = ids.length;
+
+        if (offset >= total) {
+            return new uint256[](0);
+        }
+
+        uint256 remaining = total - offset;
+        uint256 size = limit < remaining ? limit : remaining;
+
+        page = new uint256[](size);
+
+        for (uint256 i = 0; i < size; i++) {
+            page[i] = ids[offset + i];
+        }
+    }
 }
