@@ -25,6 +25,7 @@ contract Vesting is ReentrancyGuard {
         uint256 claimedAmount;
         bool revocable;
         Status status;
+        uint256 vestedAtCancel;
     }
 
     uint256 public nextAgreementId;
@@ -84,7 +85,8 @@ contract Vesting is ReentrancyGuard {
             endTime: endTime,
             claimedAmount: 0,
             revocable: revocable,
-            status: Status.Active
+            status: Status.Active,
+            vestedAtCancel: 0
         });
 
         IERC20(token).safeTransferFrom(
@@ -114,6 +116,10 @@ contract Vesting is ReentrancyGuard {
         );
 
         Agreement storage agreement = agreements[agreementId];
+
+        if (agreement.status == Status.Cancelled) {
+            return agreement.vestedAtCancel;
+        }
 
         uint256 currentTime = block.timestamp;
 
@@ -203,6 +209,52 @@ contract Vesting is ReentrancyGuard {
             agreement.beneficiary,
             amount
         );
+    }
+
+    event AgreementCancelled(
+        uint256 indexed agreementId,
+        address indexed payer,
+        uint256 vestedAmount,
+        uint256 refundedAmount
+    );
+
+    error NotRevocable();
+    error AgreementNotActive();
+    error VestingAlreadyEnded();
+
+    function cancel(uint256 agreementId) external nonReentrant {
+        if (agreementId >= nextAgreementId) {
+            revert AgreementNotFound();
+        }
+
+        Agreement storage agreement = agreements[agreementId];
+
+        if (msg.sender != agreement.payer) {
+            revert Unauthorized();
+        }
+
+        if (!agreement.revocable) {
+            revert NotRevocable();
+        }
+
+        if (agreement.status != Status.Active) {
+            revert AgreementNotActive();
+        }
+
+        if (block.timestamp >= agreement.endTime) {
+            revert VestingAlreadyEnded();
+        }
+
+        uint256 vested = vestedAmount(agreementId);
+
+        uint256 refund = agreement.totalAmount - vested;
+
+        agreement.vestedAtCancel = vested;
+        agreement.status = Status.Cancelled;
+
+        agreement.token.safeTransfer(agreement.payer, refund);
+
+        emit AgreementCancelled(agreementId, agreement.payer, vested, refund);
     }
 
 }
