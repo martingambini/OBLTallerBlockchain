@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { network } from "hardhat";
 import { parseUnits } from "viem";
 
+const DECIMALS = 6;
+
 test("Debe crear un acuerdo y bloquear los tokens", async () => {
 
   const { viem } = await network.connect();
@@ -13,7 +15,7 @@ test("Debe crear un acuerdo y bloquear los tokens", async () => {
   const token = await viem.deployContract("MockToken");
   const vesting = await viem.deployContract("Vesting");
 
-  const amount = parseUnits("3000", 18);
+  const amount = parseUnits("3000", DECIMALS);
 
   const block = await publicClient.getBlock();
   const startTime = block.timestamp + 60n;
@@ -69,7 +71,7 @@ test("Debe rechazar acuerdos inválidos", async () => {
   const token = await viem.deployContract("MockToken");
   const vesting = await viem.deployContract("Vesting");
 
-  const amount = parseUnits("3000", 18);
+  const amount = parseUnits("3000", DECIMALS);
 
   const block = await publicClient.getBlock();
   const startTime = block.timestamp + 3600n;
@@ -164,7 +166,7 @@ test("Debe calcular correctamente el vesting lineal", async () => {
   const token = await viem.deployContract("MockToken");
   const vesting = await viem.deployContract("Vesting");
 
-  const amount = parseUnits("3000", 18);
+  const amount = parseUnits("3000", DECIMALS);
 
   const block = await publicClient.getBlock();
 
@@ -194,7 +196,7 @@ test("Debe calcular correctamente el vesting lineal", async () => {
   await testClient.mine({ blocks: 1 });
 
   vested = await vesting.read.vestedAmount([0n]);
-  assert.equal(vested, parseUnits("1500", 18));
+  assert.equal(vested, parseUnits("1500", DECIMALS));
 
   // TEST 3: Fin del período (día 30)
   await testClient.setNextBlockTimestamp({
@@ -230,8 +232,8 @@ test("Debe permitir reclamos parciales y evitar dobles retiros", async () => {
   const token = await viem.deployContract("MockToken");
   const vesting = await viem.deployContract("Vesting");
 
-  const amount = parseUnits("3000", 18);
-  const half = parseUnits("1500", 18);
+  const amount = parseUnits("3000", DECIMALS);
+  const half = parseUnits("1500", DECIMALS);
 
   const block = await publicClient.getBlock();
   const startTime = block.timestamp + 3600n;
@@ -329,7 +331,7 @@ const DAY = 24n * 60n * 60n;
 async function setupAgreement(
   opts: { amount?: bigint; duration?: bigint; revocable?: boolean } = {},
 ) {
-  const amount = opts.amount ?? parseUnits("3000", 18);
+  const amount = opts.amount ?? parseUnits("3000", DECIMALS);
   const duration = opts.duration ?? 30n * DAY;
   const revocable = opts.revocable ?? true;
 
@@ -447,7 +449,7 @@ test("Cancelar después de un reclamo parcial respeta lo ya retirado", async () 
     timestamp: s.startTime + s.duration / 4n,
   });
   await s.vesting.write.claim([0n], { account: s.beneficiary.account });
-  const quarter = parseUnits("750", 18);
+  const quarter = parseUnits("750", DECIMALS);
   assert.equal(
     await s.token.read.balanceOf([s.beneficiary.account.address]),
     quarter,
@@ -463,7 +465,7 @@ test("Cancelar después de un reclamo parcial respeta lo ya retirado", async () 
   await s.vesting.write.claim([0n], { account: s.beneficiary.account });
   assert.equal(
     await s.token.read.balanceOf([s.beneficiary.account.address]),
-    parseUnits("1500", 18),
+    parseUnits("1500", DECIMALS),
   );
   assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
 });
