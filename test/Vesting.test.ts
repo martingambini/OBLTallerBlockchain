@@ -1,585 +1,441 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
+import { expect } from "chai";
 import { network } from "hardhat";
-import { parseUnits } from "viem";
+
+const { ethers, networkHelpers } = await network.connect();
+const { time, loadFixture } = networkHelpers;
 
 const DECIMALS = 6;
-
-test("Debe crear un acuerdo y bloquear los tokens", async () => {
-
-  const { viem } = await network.connect();
-
-  const [payer, beneficiary] = await viem.getWalletClients();
-  const publicClient = await viem.getPublicClient();
-
-  const token = await viem.deployContract("MockToken");
-  const vesting = await viem.deployContract("Vesting");
-
-  const amount = parseUnits("3000", DECIMALS);
-
-  const block = await publicClient.getBlock();
-  const startTime = block.timestamp + 60n;
-  const endTime = startTime + 30n * 24n * 60n * 60n;
-
-  const approveHash = await token.write.approve([vesting.address, amount]);
-
-  await publicClient.waitForTransactionReceipt({
-    hash: approveHash,
-  });
-
-  const createHash = await vesting.write.createAgreement([
-    beneficiary.account.address,
-    token.address,
-    amount,
-    startTime,
-    startTime,
-    endTime,
-    true,
-  ]);
-
-  const receipt = await publicClient.waitForTransactionReceipt({
-    hash: createHash,
-  });
-
-  assert.equal(receipt.status, "success");
-
-  const agreement = await vesting.read.getAgreement([0n]);
-
-
-  assert.equal(agreement.payer.toLowerCase(), payer.account.address.toLowerCase());
-
-  assert.equal(
-    agreement.beneficiary.toLowerCase(),
-    beneficiary.account.address.toLowerCase(),
-  );
-
-  assert.equal(agreement.totalAmount, amount);
-
-  const balance = await token.read.balanceOf([vesting.address]);
-
-  assert.equal(balance, amount);
-
-  const nextId = await vesting.read.nextAgreementId();
-  assert.equal(nextId, 1n);
-});
-
-test("Debe rechazar acuerdos inválidos", async () => {
-  const { viem } = await network.connect();
-
-  const [, beneficiary] = await viem.getWalletClients();
-  const publicClient = await viem.getPublicClient();
-
-  const token = await viem.deployContract("MockToken");
-  const vesting = await viem.deployContract("Vesting");
-
-  const amount = parseUnits("3000", DECIMALS);
-
-  const block = await publicClient.getBlock();
-  const startTime = block.timestamp + 3600n;
-  const endTime = startTime + 86400n;
-
-  const zeroAddress = "0x0000000000000000000000000000000000000000";
-
-  // TEST 1: Beneficiario inválido
-  await assert.rejects(
-    vesting.write.createAgreement([
-      zeroAddress,
-      token.address,
-      amount,
-      startTime,
-      startTime,
-      endTime,
-      true,
-    ]),
-  );
-
-  // TEST 2: Monto cero
-  await assert.rejects(
-    vesting.write.createAgreement([
-      beneficiary.account.address,
-      token.address,
-      0n,
-      startTime,
-      startTime,
-      endTime,
-      true,
-    ]),
-  );
-
-  // TEST 3: Fecha final igual a la inicial
-  await assert.rejects(
-    vesting.write.createAgreement([
-      beneficiary.account.address,
-      token.address,
-      amount,
-      startTime,
-      startTime,
-      startTime,
-      true,
-    ]),
-  );
-
-  // TEST 4: Fecha final anterior a la inicial
-  await assert.rejects(
-    vesting.write.createAgreement([
-      beneficiary.account.address,
-      token.address,
-      amount,
-      endTime,
-      endTime,
-      startTime,
-      true,
-    ]),
-  );
-
-  // TEST 5: Token inválido
-  await assert.rejects(
-    vesting.write.createAgreement([
-      beneficiary.account.address,
-      zeroAddress,
-      amount,
-      startTime,
-      startTime,
-      endTime,
-      true,
-    ]),
-  );
-
-  // TEST 6: Sin approve (allowance insuficiente)
-  await assert.rejects(
-    vesting.write.createAgreement([
-      beneficiary.account.address,
-      token.address,
-      amount,
-      startTime,
-      startTime,
-      endTime,
-      true,
-    ]),
-  );
-
-  const nextId = await vesting.read.nextAgreementId();
-
-  assert.equal(nextId, 0n);
-});
-
-test("Debe calcular correctamente el vesting lineal", async () => {
-  const { viem } = await network.connect();
-
-  const [, beneficiary] = await viem.getWalletClients();
-  const publicClient = await viem.getPublicClient();
-  const testClient = await viem.getTestClient();
-
-  const token = await viem.deployContract("MockToken");
-  const vesting = await viem.deployContract("Vesting");
-
-  const amount = parseUnits("3000", DECIMALS);
-
-  const block = await publicClient.getBlock();
-
-  const startTime = block.timestamp + 3600n;
-  const duration = 30n * 24n * 60n * 60n;
-  const endTime = startTime + duration;
-
-  await token.write.approve([vesting.address, amount]);
-
-  await vesting.write.createAgreement([
-    beneficiary.account.address,
-    token.address,
-    amount,
-    startTime,
-    startTime,
-    endTime,
-    true,
-  ]);
-
-  // TEST 1: Antes del inicio
-  let vested = await vesting.read.vestedAmount([0n]);
-  assert.equal(vested, 0n);
-
-  // TEST 2: Mitad del período (día 15)
-  await testClient.setNextBlockTimestamp({
-    timestamp: startTime + duration / 2n,
-  });
-  await testClient.mine({ blocks: 1 });
-
-  vested = await vesting.read.vestedAmount([0n]);
-  assert.equal(vested, parseUnits("1500", DECIMALS));
-
-  // TEST 3: Fin del período (día 30)
-  await testClient.setNextBlockTimestamp({
-    timestamp: endTime,
-  });
-  await testClient.mine({ blocks: 1 });
-
-  vested = await vesting.read.vestedAmount([0n]);
-  assert.equal(vested, amount);
-
-  // TEST 4: Después del final
-  await testClient.setNextBlockTimestamp({
-    timestamp: endTime + 86400n,
-  });
-  await testClient.mine({ blocks: 1 });
-
-  vested = await vesting.read.vestedAmount([0n]);
-  assert.equal(vested, amount);
-
-  // TEST 5: Disponible para reclamar
-  const claimable = await vesting.read.claimableAmount([0n]);
-  assert.equal(claimable, amount);
-});
-
-test("Debe permitir reclamos parciales y evitar dobles retiros", async () => {
-  const { viem } = await network.connect();
-
-  const [, beneficiary, stranger] = await viem.getWalletClients();
-
-  const publicClient = await viem.getPublicClient();
-  const testClient = await viem.getTestClient();
-
-  const token = await viem.deployContract("MockToken");
-  const vesting = await viem.deployContract("Vesting");
-
-  const amount = parseUnits("3000", DECIMALS);
-  const half = parseUnits("1500", DECIMALS);
-
-  const block = await publicClient.getBlock();
-  const startTime = block.timestamp + 3600n;
-  const duration = 30n * 24n * 60n * 60n;
-  const endTime = startTime + duration;
-
-  await token.write.approve([vesting.address, amount]);
-
-  await vesting.write.createAgreement([
-    beneficiary.account.address,
-    token.address,
-    amount,
-    startTime,
-    startTime,
-    endTime,
-    true,
-  ]);
-
-  await assert.rejects(
-    vesting.write.claim([0n], {
-      account: beneficiary.account,
-    }),
-  );
-
-  await testClient.setNextBlockTimestamp({
-    timestamp: startTime + duration / 2n,
-  });
-
-  const claimHash = await vesting.write.claim([0n], {
-    account: beneficiary.account,
-  });
-
-  const claimReceipt = await publicClient.waitForTransactionReceipt({
-    hash: claimHash,
-  });
-
-  const claimBlock = await publicClient.getBlock({
-    blockNumber: claimReceipt.blockNumber,
-  });
-
-  assert.equal(claimBlock.timestamp, startTime + duration / 2n);
-
-  const beneficiaryBalance = await token.read.balanceOf([
-    beneficiary.account.address,
-  ]);
-
-  assert.equal(beneficiaryBalance, half);
-
-  const agreement = await vesting.read.getAgreement([0n]);
-  assert.equal(agreement.claimedAmount, half);
-
-  await assert.rejects(
-    vesting.write.claim([0n], {
-      account: stranger.account,
-    }),
-  );
-
-  await testClient.setNextBlockTimestamp({
-    timestamp: endTime,
-  });
-
-  const finalClaimHash = await vesting.write.claim([0n], {
-    account: beneficiary.account,
-  });
-
-  await publicClient.waitForTransactionReceipt({
-    hash: finalClaimHash,
-  });
-
-  const finalBalance = await token.read.balanceOf([
-    beneficiary.account.address,
-  ]);
-
-  assert.equal(finalBalance, amount);
-
-  const finalAgreement = await vesting.read.getAgreement([0n]);
-  assert.equal(finalAgreement.status, 1);
-
-  await assert.rejects(
-    vesting.write.claim([0n], {
-      account: beneficiary.account,
-    }),
-  );
-
-  const balanceAfterDoubleClaim = await token.read.balanceOf([
-    beneficiary.account.address,
-  ]);
-  assert.equal(balanceAfterDoubleClaim, amount);
-
-  const vestingBalance = await token.read.balanceOf([vesting.address]);
-  assert.equal(vestingBalance, 0n);
-});
-
 const DAY = 24n * 60n * 60n;
 
-async function setupAgreement(
+const units = (value: string) => ethers.parseUnits(value, DECIMALS);
+
+async function now() {
+  return BigInt(await time.latest());
+}
+
+async function deployFixture() {
+  const [payer, beneficiary, stranger] = await ethers.getSigners();
+  const token = await ethers.deployContract("MockToken");
+  const vesting = await ethers.deployContract("Vesting");
+  return { payer, beneficiary, stranger, token, vesting };
+}
+
+type Context = Awaited<ReturnType<typeof deployFixture>>;
+
+async function createAgreement(
+  ctx: Context,
   opts: { amount?: bigint; duration?: bigint; revocable?: boolean } = {},
 ) {
-  const amount = opts.amount ?? parseUnits("3000", DECIMALS);
+  const amount = opts.amount ?? units("3000");
   const duration = opts.duration ?? 30n * DAY;
   const revocable = opts.revocable ?? true;
 
-  const { viem } = await network.connect();
-  const [payer, beneficiary, stranger] = await viem.getWalletClients();
-  const publicClient = await viem.getPublicClient();
-  const testClient = await viem.getTestClient();
-
-  const token = await viem.deployContract("MockToken");
-  const vesting = await viem.deployContract("Vesting");
-
-  const block = await publicClient.getBlock();
-  const startTime = block.timestamp + 3600n;
+  const startTime = (await now()) + 3600n;
   const endTime = startTime + duration;
 
-  await token.write.approve([vesting.address, amount]);
-  await vesting.write.createAgreement([
-    beneficiary.account.address,
-    token.address,
+  await ctx.token.approve(await ctx.vesting.getAddress(), amount);
+  await ctx.vesting.createAgreement(
+    ctx.beneficiary.address,
+    await ctx.token.getAddress(),
     amount,
     startTime,
     startTime,
     endTime,
     revocable,
-  ]);
+  );
 
-  return {
-    payer,
-    beneficiary,
-    stranger,
-    publicClient,
-    testClient,
-    token,
-    vesting,
-    amount,
-    duration,
-    startTime,
-    startTime,
-    endTime,
-  };
+  return { amount, duration, startTime, endTime };
 }
 
-test("Cancelación válida: devuelve lo no devengado al pagador y congela lo devengado", async () => {
-  const s = await setupAgreement();
-  const half = s.amount / 2n;
+describe("Vesting", function () {
+  describe("creación de acuerdos", function () {
+    it("crea un acuerdo y bloquea los tokens", async function () {
+      const { payer, beneficiary, token, vesting } =
+        await loadFixture(deployFixture);
 
-  const payerBefore = await s.token.read.balanceOf([s.payer.account.address]);
+      const amount = units("3000");
+      const startTime = (await now()) + 60n;
+      const endTime = startTime + 30n * DAY;
 
-  await s.testClient.setNextBlockTimestamp({
-    timestamp: s.startTime + s.duration / 2n,
-  });
-  const hash = await s.vesting.write.cancel([0n]);
-  const receipt = await s.publicClient.waitForTransactionReceipt({ hash });
+      await token.approve(await vesting.getAddress(), amount);
 
-  const payerAfter = await s.token.read.balanceOf([s.payer.account.address]);
-  assert.equal(payerAfter - payerBefore, half);
+      await vesting.createAgreement(
+        beneficiary.address,
+        await token.getAddress(),
+        amount,
+        startTime,
+        startTime,
+        endTime,
+        true,
+      );
 
-  assert.equal(await s.token.read.balanceOf([s.vesting.address]), half);
+      const agreement = await vesting.getAgreement(0);
 
-  const agreement = await s.vesting.read.getAgreement([0n]);
-  assert.equal(agreement.status, 2);
-  assert.equal(agreement.vestedAtCancel, half);
+      expect(agreement.payer).to.equal(payer.address);
+      expect(agreement.beneficiary).to.equal(beneficiary.address);
+      expect(agreement.totalAmount).to.equal(amount);
 
-  const events = await s.vesting.getEvents.AgreementCancelled(
-    {},
-    { fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber },
-  );
-  assert.equal(events.length, 1);
-  assert.equal(events[0].args.agreementId, 0n);
-  assert.equal(
-    events[0].args.payer?.toLowerCase(),
-    s.payer.account.address.toLowerCase(),
-  );
-  assert.equal(events[0].args.vestedAmount, half);
-  assert.equal(events[0].args.refundedAmount, half);
-});
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(
+        amount,
+      );
 
-test("Tras cancelar, el beneficiario reclama lo devengado y el devengado ya no crece", async () => {
-  const s = await setupAgreement();
-  const half = s.amount / 2n;
+      expect(await vesting.nextAgreementId()).to.equal(1n);
+    });
 
-  await s.testClient.setNextBlockTimestamp({
-    timestamp: s.startTime + s.duration / 2n,
-  });
-  await s.vesting.write.cancel([0n]);
+    it("rechaza acuerdos inválidos", async function () {
+      const { beneficiary, token, vesting } = await loadFixture(deployFixture);
 
-  await s.testClient.setNextBlockTimestamp({
-    timestamp: s.endTime + DAY,
-  });
-  await s.testClient.mine({ blocks: 1 });
+      const amount = units("3000");
+      const startTime = (await now()) + 3600n;
+      const endTime = startTime + 86400n;
 
-  assert.equal(await s.vesting.read.vestedAmount([0n]), half);
-  assert.equal(await s.vesting.read.claimableAmount([0n]), half);
+      const tokenAddress = await token.getAddress();
 
-  await s.vesting.write.claim([0n], { account: s.beneficiary.account });
+      // TEST 1: Beneficiario inválido
+      await expect(
+        vesting.createAgreement(
+          ethers.ZeroAddress,
+          tokenAddress,
+          amount,
+          startTime,
+          startTime,
+          endTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "InvalidBeneficiary");
 
-  assert.equal(
-    await s.token.read.balanceOf([s.beneficiary.account.address]),
-    half,
-  );
-  const agreement = await s.vesting.read.getAgreement([0n]);
-  assert.equal(agreement.status, 2);
-  assert.equal(agreement.claimedAmount, half);
+      // TEST 2: Monto cero
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          tokenAddress,
+          0,
+          startTime,
+          startTime,
+          endTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "InvalidAmount");
 
-  assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
+      // TEST 3: Fecha final igual a la inicial
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          tokenAddress,
+          amount,
+          startTime,
+          startTime,
+          startTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "InvalidTimeRange");
 
-  await assert.rejects(
-    s.vesting.write.claim([0n], { account: s.beneficiary.account }),
-    /NothingToClaim/,
-  );
-});
+      // TEST 4: Fecha final anterior a la inicial
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          tokenAddress,
+          amount,
+          endTime,
+          endTime,
+          startTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "InvalidTimeRange");
 
-test("Cancelar después de un reclamo parcial respeta lo ya retirado", async () => {
-  const s = await setupAgreement();
+      // TEST 5: Token inválido
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          ethers.ZeroAddress,
+          amount,
+          startTime,
+          startTime,
+          endTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "InvalidToken");
 
-  await s.testClient.setNextBlockTimestamp({
-    timestamp: s.startTime + s.duration / 4n,
-  });
-  await s.vesting.write.claim([0n], { account: s.beneficiary.account });
-  const quarter = parseUnits("750", DECIMALS);
-  assert.equal(
-    await s.token.read.balanceOf([s.beneficiary.account.address]),
-    quarter,
-  );
+      // TEST 6: Sin approve (allowance insuficiente)
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          tokenAddress,
+          amount,
+          startTime,
+          startTime,
+          endTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(token, "ERC20InsufficientAllowance");
 
-  await s.testClient.setNextBlockTimestamp({
-    timestamp: s.startTime + s.duration / 2n,
-  });
-  await s.vesting.write.cancel([0n]);
-
-  assert.equal(await s.vesting.read.claimableAmount([0n]), quarter);
-
-  await s.vesting.write.claim([0n], { account: s.beneficiary.account });
-  assert.equal(
-    await s.token.read.balanceOf([s.beneficiary.account.address]),
-    parseUnits("1500", DECIMALS),
-  );
-  assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
-});
-
-test("Cancelar antes del inicio devuelve todo al pagador", async () => {
-  const s = await setupAgreement();
-
-  const payerBefore = await s.token.read.balanceOf([s.payer.account.address]);
-
-  await s.testClient.setNextBlockTimestamp({ timestamp: s.startTime - 10n });
-  await s.vesting.write.cancel([0n]);
-
-  const payerAfter = await s.token.read.balanceOf([s.payer.account.address]);
-  assert.equal(payerAfter - payerBefore, s.amount);
-  assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
-  assert.equal(await s.vesting.read.vestedAmount([0n]), 0n);
-
-  await assert.rejects(
-    s.vesting.write.claim([0n], { account: s.beneficiary.account }),
-    /NothingToClaim/,
-  );
-});
-
-test("Redondeo al cancelar: reclamado + devuelto = depositado, sin retirar de más", async () => {
-  const s = await setupAgreement({ amount: 100n, duration: 3n });
-
-  await s.testClient.setNextBlockTimestamp({ timestamp: s.startTime + 1n });
-  const payerBefore = await s.token.read.balanceOf([s.payer.account.address]);
-  await s.vesting.write.cancel([0n]);
-
-  const refund =
-    (await s.token.read.balanceOf([s.payer.account.address])) - payerBefore;
-  assert.equal(refund, 67n);
-  assert.equal(await s.vesting.read.vestedAmount([0n]), 33n);
-
-  await s.vesting.write.claim([0n], { account: s.beneficiary.account });
-  const claimed = await s.token.read.balanceOf([s.beneficiary.account.address]);
-  assert.equal(claimed, 33n);
-
-  assert.equal(claimed + refund, s.amount);
-  assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
-});
-
-test("Solo el pagador puede cancelar", async () => {
-  const s = await setupAgreement();
-
-  await s.testClient.setNextBlockTimestamp({
-    timestamp: s.startTime + s.duration / 2n,
+      expect(await vesting.nextAgreementId()).to.equal(0n);
+    });
   });
 
-  await assert.rejects(
-    s.vesting.write.cancel([0n], { account: s.beneficiary.account }),
-    /Unauthorized/,
-  );
+  describe("devengado lineal", function () {
+    it("calcula correctamente el vesting lineal", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { vesting } = ctx;
+      const { amount, duration, startTime, endTime } =
+        await createAgreement(ctx);
 
-  await assert.rejects(
-    s.vesting.write.cancel([0n], { account: s.stranger.account }),
-    /Unauthorized/,
-  );
+      // TEST 1: Antes del inicio
+      expect(await vesting.vestedAmount(0)).to.equal(0n);
 
-  const agreement = await s.vesting.read.getAgreement([0n]);
-  assert.equal(agreement.status, 0);
-});
+      // TEST 2: Mitad del período (día 15)
+      await time.increaseTo(startTime + duration / 2n);
+      expect(await vesting.vestedAmount(0)).to.equal(units("1500"));
 
-test("No se puede cancelar un acuerdo no revocable", async () => {
-  const s = await setupAgreement({ revocable: false });
+      // TEST 3: Fin del período (día 30)
+      await time.increaseTo(endTime);
+      expect(await vesting.vestedAmount(0)).to.equal(amount);
 
-  await s.testClient.setNextBlockTimestamp({
-    timestamp: s.startTime + s.duration / 2n,
+      // TEST 4: Después del final
+      await time.increaseTo(endTime + DAY);
+      expect(await vesting.vestedAmount(0)).to.equal(amount);
+
+      // TEST 5: Disponible para reclamar
+      expect(await vesting.claimableAmount(0)).to.equal(amount);
+    });
   });
 
-  await assert.rejects(s.vesting.write.cancel([0n]), /NotRevocable/);
+  describe("reclamos", function () {
+    it("permite reclamos parciales y evita dobles retiros", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, stranger, token, vesting } = ctx;
+      const { amount, duration, startTime, endTime } =
+        await createAgreement(ctx);
+      const half = units("1500");
 
-  const agreement = await s.vesting.read.getAgreement([0n]);
-  assert.equal(agreement.status, 0);
-  assert.equal(await s.token.read.balanceOf([s.vesting.address]), s.amount);
-});
+      await expect(
+        vesting.connect(beneficiary).claim(0),
+      ).to.be.revertedWithCustomError(vesting, "NothingToClaim");
 
-test("No se puede cancelar dos veces", async () => {
-  const s = await setupAgreement();
+      await time.setNextBlockTimestamp(startTime + duration / 2n);
 
-  await s.testClient.setNextBlockTimestamp({
-    timestamp: s.startTime + s.duration / 2n,
+      await expect(vesting.connect(beneficiary).claim(0))
+        .to.emit(vesting, "TokensClaimed")
+        .withArgs(0n, beneficiary.address, half);
+
+      expect(await now()).to.equal(startTime + duration / 2n);
+      expect(await token.balanceOf(beneficiary.address)).to.equal(half);
+      expect((await vesting.getAgreement(0)).claimedAmount).to.equal(half);
+
+      await expect(
+        vesting.connect(stranger).claim(0),
+      ).to.be.revertedWithCustomError(vesting, "Unauthorized");
+
+      await time.setNextBlockTimestamp(endTime);
+      await vesting.connect(beneficiary).claim(0);
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(amount);
+      expect((await vesting.getAgreement(0)).status).to.equal(1n);
+
+      await expect(
+        vesting.connect(beneficiary).claim(0),
+      ).to.be.revertedWithCustomError(vesting, "AgreementCompleted");
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(amount);
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+    });
   });
-  await s.vesting.write.cancel([0n]);
 
-  await assert.rejects(s.vesting.write.cancel([0n]), /AgreementNotActive/);
-});
+  describe("cancelación", function () {
+    it("devuelve lo no devengado al pagador y congela lo devengado", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { payer, token, vesting } = ctx;
+      const { amount, duration, startTime } = await createAgreement(ctx);
+      const half = amount / 2n;
 
-test("No se puede cancelar cuando el período ya terminó", async () => {
-  const s = await setupAgreement();
+      const payerBefore = await token.balanceOf(payer.address);
 
-  await s.testClient.setNextBlockTimestamp({ timestamp: s.endTime });
+      await time.setNextBlockTimestamp(startTime + duration / 2n);
+      await expect(vesting.cancel(0))
+        .to.emit(vesting, "AgreementCancelled")
+        .withArgs(0n, payer.address, half, half);
 
-  await assert.rejects(s.vesting.write.cancel([0n]), /VestingAlreadyEnded/);
+      const payerAfter = await token.balanceOf(payer.address);
+      expect(payerAfter - payerBefore).to.equal(half);
 
-  await s.testClient.setNextBlockTimestamp({ timestamp: s.endTime + 1n });
-  await s.testClient.mine({ blocks: 1 });
-  assert.equal(await s.vesting.read.claimableAmount([0n]), s.amount);
-});
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(half);
 
-test("No se puede cancelar un acuerdo inexistente", async () => {
-  const s = await setupAgreement();
+      const agreement = await vesting.getAgreement(0);
+      expect(agreement.status).to.equal(2n);
+      expect(agreement.vestedAtCancel).to.equal(half);
+    });
 
-  await assert.rejects(s.vesting.write.cancel([99n]), /AgreementNotFound/);
+    it("tras cancelar, el beneficiario reclama lo devengado y el devengado ya no crece", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, token, vesting } = ctx;
+      const { amount, duration, startTime, endTime } =
+        await createAgreement(ctx);
+      const half = amount / 2n;
+
+      await time.setNextBlockTimestamp(startTime + duration / 2n);
+      await vesting.cancel(0);
+
+      await time.increaseTo(endTime + DAY);
+
+      expect(await vesting.vestedAmount(0)).to.equal(half);
+      expect(await vesting.claimableAmount(0)).to.equal(half);
+
+      await vesting.connect(beneficiary).claim(0);
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(half);
+
+      const agreement = await vesting.getAgreement(0);
+      expect(agreement.status).to.equal(2n);
+      expect(agreement.claimedAmount).to.equal(half);
+
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+
+      await expect(
+        vesting.connect(beneficiary).claim(0),
+      ).to.be.revertedWithCustomError(vesting, "NothingToClaim");
+    });
+
+    it("cancelar después de un reclamo parcial respeta lo ya retirado", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, token, vesting } = ctx;
+      const { duration, startTime } = await createAgreement(ctx);
+      const quarter = units("750");
+
+      await time.setNextBlockTimestamp(startTime + duration / 4n);
+      await vesting.connect(beneficiary).claim(0);
+      expect(await token.balanceOf(beneficiary.address)).to.equal(quarter);
+
+      await time.setNextBlockTimestamp(startTime + duration / 2n);
+      await vesting.cancel(0);
+
+      expect(await vesting.claimableAmount(0)).to.equal(quarter);
+
+      await vesting.connect(beneficiary).claim(0);
+      expect(await token.balanceOf(beneficiary.address)).to.equal(
+        units("1500"),
+      );
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+    });
+
+    it("cancelar antes del inicio devuelve todo al pagador", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { payer, beneficiary, token, vesting } = ctx;
+      const { amount, startTime } = await createAgreement(ctx);
+
+      const payerBefore = await token.balanceOf(payer.address);
+
+      await time.setNextBlockTimestamp(startTime - 10n);
+      await vesting.cancel(0);
+
+      const payerAfter = await token.balanceOf(payer.address);
+      expect(payerAfter - payerBefore).to.equal(amount);
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+      expect(await vesting.vestedAmount(0)).to.equal(0n);
+
+      await expect(
+        vesting.connect(beneficiary).claim(0),
+      ).to.be.revertedWithCustomError(vesting, "NothingToClaim");
+    });
+
+    it("redondeo al cancelar: reclamado + devuelto = depositado, sin retirar de más", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { payer, beneficiary, token, vesting } = ctx;
+      const { amount, startTime } = await createAgreement(ctx, {
+        amount: 100n,
+        duration: 3n,
+      });
+
+      await time.setNextBlockTimestamp(startTime + 1n);
+      const payerBefore = await token.balanceOf(payer.address);
+      await vesting.cancel(0);
+
+      const refund = (await token.balanceOf(payer.address)) - payerBefore;
+      expect(refund).to.equal(67n);
+      expect(await vesting.vestedAmount(0)).to.equal(33n);
+
+      await vesting.connect(beneficiary).claim(0);
+      const claimed = await token.balanceOf(beneficiary.address);
+      expect(claimed).to.equal(33n);
+
+      expect(claimed + refund).to.equal(amount);
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+    });
+
+    it("solo el pagador puede cancelar", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, stranger, vesting } = ctx;
+      const { duration, startTime } = await createAgreement(ctx);
+
+      await time.setNextBlockTimestamp(startTime + duration / 2n);
+
+      await expect(
+        vesting.connect(beneficiary).cancel(0),
+      ).to.be.revertedWithCustomError(vesting, "Unauthorized");
+
+      await expect(
+        vesting.connect(stranger).cancel(0),
+      ).to.be.revertedWithCustomError(vesting, "Unauthorized");
+
+      expect((await vesting.getAgreement(0)).status).to.equal(0n);
+    });
+
+    it("no se puede cancelar un acuerdo no revocable", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { token, vesting } = ctx;
+      const { amount, duration, startTime } = await createAgreement(ctx, {
+        revocable: false,
+      });
+
+      await time.setNextBlockTimestamp(startTime + duration / 2n);
+
+      await expect(vesting.cancel(0)).to.be.revertedWithCustomError(
+        vesting,
+        "NotRevocable",
+      );
+
+      expect((await vesting.getAgreement(0)).status).to.equal(0n);
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(
+        amount,
+      );
+    });
+
+    it("no se puede cancelar dos veces", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { vesting } = ctx;
+      const { duration, startTime } = await createAgreement(ctx);
+
+      await time.setNextBlockTimestamp(startTime + duration / 2n);
+      await vesting.cancel(0);
+
+      await expect(vesting.cancel(0)).to.be.revertedWithCustomError(
+        vesting,
+        "AgreementNotActive",
+      );
+    });
+
+    it("no se puede cancelar cuando el período ya terminó", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { vesting } = ctx;
+      const { amount, endTime } = await createAgreement(ctx);
+
+      await time.setNextBlockTimestamp(endTime);
+
+      await expect(vesting.cancel(0)).to.be.revertedWithCustomError(
+        vesting,
+        "VestingAlreadyEnded",
+      );
+
+      await time.increaseTo(endTime + 1n);
+      expect(await vesting.claimableAmount(0)).to.equal(amount);
+    });
+
+    it("no se puede cancelar un acuerdo inexistente", async function () {
+      const { vesting } = await loadFixture(deployFixture);
+
+      await expect(vesting.cancel(99)).to.be.revertedWithCustomError(
+        vesting,
+        "AgreementNotFound",
+      );
+    });
+  });
 });
