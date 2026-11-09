@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { network } from "hardhat";
 import { parseUnits } from "viem";
 
+const DECIMALS = 6;
+
 const DAY = 24n * 60n * 60n;
 
 async function setup() {
@@ -64,7 +66,7 @@ async function createWithCliff(
 
 test("Guarda todos los campos del acuerdo, incluido el cliff, y emite el evento", async () => {
   const s = await setup();
-  const amount = parseUnits("1000", 18);
+  const amount = parseUnits("1000", DECIMALS);
   const startTime = s.now + 100n;
   const cliffTime = startTime + 10n * DAY;
   const endTime = startTime + 100n * DAY;
@@ -115,7 +117,7 @@ test("Guarda todos los campos del acuerdo, incluido el cliff, y emite el evento"
 
 test("Antes del cliff no se devenga nada; en el cliff se devenga lo lineal desde el inicio", async () => {
   const s = await setup();
-  const amount = parseUnits("1000", 18);
+  const amount = parseUnits("1000", DECIMALS);
   const { startTime, cliffTime } = await createWithCliff(s, {
     amount,
     startOffset: 100n,
@@ -136,23 +138,23 @@ test("Antes del cliff no se devenga nada; en el cliff se devenga lo lineal desde
   await s.vesting.write.claim([0n], { account: s.beneficiary.account });
   assert.equal(
     await s.token.read.balanceOf([s.beneficiary.account.address]),
-    parseUnits("300", 18),
+    parseUnits("300", DECIMALS),
   );
 
   await s.travelTo(startTime + 50n * DAY);
   assert.equal(
     await s.vesting.read.vestedAmount([0n]),
-    parseUnits("500", 18),
+    parseUnits("500", DECIMALS),
   );
   assert.equal(
     await s.vesting.read.claimableAmount([0n]),
-    parseUnits("200", 18),
+    parseUnits("200", DECIMALS),
   );
 });
 
 test("Con el cliff igual al fin no se devenga nada hasta el final", async () => {
   const s = await setup();
-  const amount = parseUnits("1000", 18);
+  const amount = parseUnits("1000", DECIMALS);
   const { endTime } = await createWithCliff(s, {
     amount,
     startOffset: 100n,
@@ -169,7 +171,7 @@ test("Con el cliff igual al fin no se devenga nada hasta el final", async () => 
 
 test("Cancelar antes del cliff devuelve todo al pagador", async () => {
   const s = await setup();
-  const amount = parseUnits("1000", 18);
+  const amount = parseUnits("1000", DECIMALS);
   const { startTime } = await createWithCliff(s, {
     amount,
     startOffset: 100n,
@@ -190,7 +192,7 @@ test("Cancelar antes del cliff devuelve todo al pagador", async () => {
 
 test("Rechaza un cliff fuera del rango [inicio, fin]", async () => {
   const s = await setup();
-  const amount = parseUnits("1000", 18);
+  const amount = parseUnits("1000", DECIMALS);
   const startTime = s.now + 100n;
   const endTime = startTime + 10n * DAY;
 
@@ -260,7 +262,7 @@ test("Rechaza montos y fechas que no entran en el struct empaquetado", async () 
 test("Rechaza tokens que cobran comisión al transferir", async () => {
   const s = await setup();
   const feeToken = await s.viem.deployContract("FeeOnTransferToken");
-  const amount = parseUnits("1000", 18);
+  const amount = parseUnits("1000", DECIMALS);
   const startTime = s.now + 100n;
   const endTime = startTime + 10n * DAY;
 
@@ -304,7 +306,7 @@ test("Las consultas por id inexistente revierten con AgreementNotFound", async (
 
 test("Listados por pagador y por beneficiario con paginación", async () => {
   const s = await setup();
-  const amount = parseUnits("10", 18);
+  const amount = parseUnits("10", DECIMALS);
 
   await s.token.write.approve([s.vesting.address, amount * 3n]);
   const startTime = s.now + 100n;
@@ -382,4 +384,27 @@ test("Listados por pagador y por beneficiario con paginación", async () => {
     await s.vesting.read.getAgreementIdsByPayer([otherAddress, 0n, 10n]),
     [],
   );
+});
+
+test("Soporta montos cercanos al máximo de uint128 sin desbordar", async () => {
+  const s = await setup();
+  const amount = 2n ** 128n - 1n;
+
+  await s.token.write.mint([s.payer.account.address, amount]);
+  const { startTime, endTime } = await createWithCliff(s, {
+    amount,
+    startOffset: 100n,
+    cliffOffset: 0n,
+    duration: 10n * DAY,
+  });
+
+  await s.travelTo(startTime + 5n * DAY);
+  assert.equal(
+    await s.vesting.read.vestedAmount([0n]),
+    (amount * (5n * DAY)) / (10n * DAY),
+  );
+
+  await s.travelTo(endTime);
+  assert.equal(await s.vesting.read.vestedAmount([0n]), amount);
+  assert.equal(await s.token.read.balanceOf([s.vesting.address]), amount);
 });
