@@ -298,4 +298,220 @@ describe("Vesting: seguridad", function () {
       ).to.be.revert(ethers);
     });
   });
+
+  describe("casos de borde del devengado", function () {
+    it("en startTime exacto no hay nada para reclamar y en endTime exacto se reclama todo", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, token, vesting } = ctx;
+      const amount = units("1000");
+      const { startTime, endTime } = await create(ctx, {
+        amount,
+        startOffset: 100n,
+        duration: 10n * DAY,
+      });
+
+      await time.increaseTo(startTime - 1n);
+      await time.setNextBlockTimestamp(startTime);
+      await expect(
+        vesting.connect(beneficiary).claim(0),
+      ).to.be.revertedWithCustomError(vesting, "NothingToClaim");
+
+      await time.setNextBlockTimestamp(endTime);
+      await vesting.connect(beneficiary).claim(0);
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(amount);
+      expect((await vesting.getAgreement(0)).status).to.equal(1n);
+    });
+
+    it("un acuerdo de 1 segundo devenga todo recién en el final", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, token, vesting } = ctx;
+      const amount = units("1000");
+      const { startTime, endTime } = await create(ctx, {
+        amount,
+        startOffset: 100n,
+        duration: 1n,
+      });
+
+      await time.increaseTo(startTime);
+      expect(await vesting.vestedAmount(0)).to.equal(0n);
+
+      await time.setNextBlockTimestamp(endTime);
+      await vesting.connect(beneficiary).claim(0);
+      expect(await token.balanceOf(beneficiary.address)).to.equal(amount);
+    });
+
+    it("un monto de 1 unidad mínima se devenga recién al final sin retirar de más", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, token, vesting } = ctx;
+      const { endTime } = await create(ctx, {
+        amount: 1n,
+        startOffset: 100n,
+        duration: 1000n,
+      });
+
+      await time.increaseTo(endTime - 2n);
+      expect(await vesting.vestedAmount(0)).to.equal(0n);
+      await expect(
+        vesting.connect(beneficiary).claim(0),
+      ).to.be.revertedWithCustomError(vesting, "NothingToClaim");
+
+      await time.setNextBlockTimestamp(endTime);
+      await vesting.connect(beneficiary).claim(0);
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(1n);
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+    });
+
+    it("con startTime en el pasado se puede reclamar lo ya devengado al instante", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, token, vesting } = ctx;
+      const amount = units("1000");
+      const startTime = (await now()) - 100n;
+      const endTime = startTime + 200n;
+
+      await token.approve(await vesting.getAddress(), amount);
+      await vesting.createAgreement(
+        beneficiary.address,
+        await token.getAddress(),
+        amount,
+        startTime,
+        startTime,
+        endTime,
+        true,
+      );
+
+      await vesting.connect(beneficiary).claim(0);
+
+      const received = await token.balanceOf(beneficiary.address);
+      expect(received).to.be.greaterThan(0n);
+      expect(received).to.be.lessThan(amount);
+    });
+
+    it("con montos cercanos a uint128 max el reclamo parcial y el final no desbordan", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { payer, beneficiary, token, vesting } = ctx;
+      const amount = 2n ** 128n - 1n;
+      await token.mint(payer.address, amount);
+
+      const { startTime, endTime } = await create(ctx, {
+        amount,
+        startOffset: 100n,
+        duration: 10n * DAY,
+      });
+
+      await time.setNextBlockTimestamp(startTime + 5n * DAY);
+      await vesting.connect(beneficiary).claim(0);
+      const first = await token.balanceOf(beneficiary.address);
+      expect(first).to.equal((amount * (5n * DAY)) / (10n * DAY));
+
+      await time.setNextBlockTimestamp(endTime);
+      await vesting.connect(beneficiary).claim(0);
+
+      expect(await token.balanceOf(beneficiary.address)).to.equal(amount);
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+    });
+
+    it("cancelar un acuerdo ya completado revierte con AgreementNotActive", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, vesting } = ctx;
+      const { endTime } = await create(ctx, {
+        amount: units("1000"),
+        startOffset: 100n,
+        duration: DAY,
+      });
+
+      await time.setNextBlockTimestamp(endTime);
+      await vesting.connect(beneficiary).claim(0);
+
+      await expect(vesting.cancel(0)).to.be.revertedWithCustomError(
+        vesting,
+        "AgreementNotActive",
+      );
+    });
+  });
+
+  describe("invariante: nunca se retira más de lo depositado", function () {
+    const scenarios: Array<[bigint, bigint]> = [
+      [10n, 3n],
+      [7n, 5n],
+      [1000001n, 7n],
+      [1n, 4n],
+    ];
+
+    for (const [amount, duration] of scenarios) {
+      it(`reclamando en cada segundo con monto ${amount} y duración ${duration}`, async function () {
+        const ctx = await loadFixture(deployFixture);
+        const { beneficiary, token, vesting } = ctx;
+        const { startTime, endTime } = await create(ctx, {
+          amount,
+          startOffset: 100n,
+          duration,
+        });
+
+        let previousVested = 0n;
+        let t = startTime;
+
+        while ((await token.balanceOf(beneficiary.address)) < amount) {
+          expect(t).to.be.lessThanOrEqual(endTime + 2n);
+
+          if (t > (await now())) {
+            await time.increaseTo(t);
+          }
+
+          const vested = await vesting.vestedAmount(0);
+          expect(vested).to.be.lessThanOrEqual(amount);
+          expect(vested).to.be.greaterThanOrEqual(previousVested);
+          previousVested = vested;
+
+          if ((await vesting.claimableAmount(0)) > 0n) {
+            await vesting.connect(beneficiary).claim(0);
+          }
+
+          const claimed = await token.balanceOf(beneficiary.address);
+          const inContract = await token.balanceOf(await vesting.getAddress());
+          expect(claimed).to.be.lessThanOrEqual(
+            await vesting.vestedAmount(0),
+          );
+          expect(claimed + inContract).to.equal(amount);
+
+          t = (await now()) + 1n;
+        }
+
+        expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+      });
+    }
+
+    it("cancelando en distintos instantes: reclamado + devuelto = depositado", async function () {
+      const amount = 1000003n;
+      const duration = 97n;
+
+      for (let offset = 0n; offset < duration; offset += 13n) {
+        const ctx = await deployFixture();
+        const { payer, beneficiary, token, vesting } = ctx;
+        const { startTime } = await create(ctx, {
+          amount,
+          startOffset: 100n,
+          duration,
+        });
+        const payerBefore = await token.balanceOf(payer.address);
+
+        await time.setNextBlockTimestamp(startTime + offset);
+        await vesting.cancel(0);
+
+        const refunded = (await token.balanceOf(payer.address)) - payerBefore;
+        const vested = (await vesting.getAgreement(0)).vestedAtCancel;
+        expect(vested + refunded).to.equal(amount);
+
+        if (vested > 0n) {
+          await vesting.connect(beneficiary).claim(0);
+        }
+
+        const claimed = await token.balanceOf(beneficiary.address);
+        expect(claimed).to.equal(vested);
+        expect(claimed + refunded).to.equal(amount);
+        expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+      }
+    });
+  });
 });
