@@ -1,410 +1,373 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
+import { expect } from "chai";
 import { network } from "hardhat";
-import { parseUnits } from "viem";
+
+const { ethers, networkHelpers } = await network.connect();
+const { time, loadFixture } = networkHelpers;
 
 const DECIMALS = 6;
-
 const DAY = 24n * 60n * 60n;
 
-async function setup() {
-  const { viem } = await network.connect();
-  const [payer, beneficiary, other] = await viem.getWalletClients();
-  const publicClient = await viem.getPublicClient();
-  const testClient = await viem.getTestClient();
-  const token = await viem.deployContract("MockToken");
-  const vesting = await viem.deployContract("Vesting");
-  const now = (await publicClient.getBlock()).timestamp;
+const units = (value: string) => ethers.parseUnits(value, DECIMALS);
 
-  async function travelTo(timestamp: bigint) {
-    await testClient.setNextBlockTimestamp({ timestamp });
-    await testClient.mine({ blocks: 1 });
-  }
-
-  return {
-    viem,
-    payer,
-    beneficiary,
-    other,
-    publicClient,
-    testClient,
-    token,
-    vesting,
-    now,
-    travelTo,
-  };
+async function now() {
+  return BigInt(await time.latest());
 }
 
+async function deployFixture() {
+  const [payer, beneficiary, other] = await ethers.getSigners();
+  const token = await ethers.deployContract("MockToken");
+  const vesting = await ethers.deployContract("Vesting");
+  return { payer, beneficiary, other, token, vesting };
+}
+
+type Context = Awaited<ReturnType<typeof deployFixture>>;
+
 async function createWithCliff(
-  s: Awaited<ReturnType<typeof setup>>,
+  ctx: Context,
   opts: {
     amount: bigint;
     startOffset: bigint;
     cliffOffset: bigint;
     duration: bigint;
     revocable?: boolean;
-    beneficiary?: `0x${string}`;
   },
 ) {
-  const startTime = s.now + opts.startOffset;
+  const startTime = (await now()) + opts.startOffset;
   const cliffTime = startTime + opts.cliffOffset;
   const endTime = startTime + opts.duration;
 
-  await s.token.write.approve([s.vesting.address, opts.amount]);
-  await s.vesting.write.createAgreement([
-    opts.beneficiary ?? s.beneficiary.account.address,
-    s.token.address,
+  await ctx.token.approve(await ctx.vesting.getAddress(), opts.amount);
+  await ctx.vesting.createAgreement(
+    ctx.beneficiary.address,
+    await ctx.token.getAddress(),
     opts.amount,
     startTime,
     cliffTime,
     endTime,
     opts.revocable ?? true,
-  ]);
+  );
 
   return { startTime, cliffTime, endTime };
 }
 
-test("Guarda todos los campos del acuerdo, incluido el cliff, y emite el evento", async () => {
-  const s = await setup();
-  const amount = parseUnits("1000", DECIMALS);
-  const startTime = s.now + 100n;
-  const cliffTime = startTime + 10n * DAY;
-  const endTime = startTime + 100n * DAY;
+describe("Vesting: cliff, listados y validaciones", function () {
+  describe("cliff", function () {
+    it("guarda todos los campos del acuerdo, incluido el cliff, y emite el evento", async function () {
+      const { payer, beneficiary, token, vesting } =
+        await loadFixture(deployFixture);
+      const amount = units("1000");
+      const startTime = (await now()) + 100n;
+      const cliffTime = startTime + 10n * DAY;
+      const endTime = startTime + 100n * DAY;
+      const tokenAddress = await token.getAddress();
 
-  await s.token.write.approve([s.vesting.address, amount]);
-  const hash = await s.vesting.write.createAgreement([
-    s.beneficiary.account.address,
-    s.token.address,
-    amount,
-    startTime,
-    cliffTime,
-    endTime,
-    false,
-  ]);
-  const receipt = await s.publicClient.waitForTransactionReceipt({ hash });
+      await token.approve(await vesting.getAddress(), amount);
 
-  const agreement = await s.vesting.read.getAgreement([0n]);
-  assert.equal(
-    agreement.payer.toLowerCase(),
-    s.payer.account.address.toLowerCase(),
-  );
-  assert.equal(
-    agreement.beneficiary.toLowerCase(),
-    s.beneficiary.account.address.toLowerCase(),
-  );
-  assert.equal(agreement.token.toLowerCase(), s.token.address.toLowerCase());
-  assert.equal(agreement.totalAmount, amount);
-  assert.equal(agreement.claimedAmount, 0n);
-  assert.equal(agreement.vestedAtCancel, 0n);
-  assert.equal(BigInt(agreement.startTime), startTime);
-  assert.equal(BigInt(agreement.cliffTime), cliffTime);
-  assert.equal(BigInt(agreement.endTime), endTime);
-  assert.equal(agreement.revocable, false);
-  assert.equal(agreement.status, 0);
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          tokenAddress,
+          amount,
+          startTime,
+          cliffTime,
+          endTime,
+          false,
+        ),
+      )
+        .to.emit(vesting, "AgreementCreated")
+        .withArgs(
+          0n,
+          payer.address,
+          beneficiary.address,
+          tokenAddress,
+          amount,
+          startTime,
+          cliffTime,
+          endTime,
+          false,
+        );
 
-  const events = await s.vesting.getEvents.AgreementCreated(
-    {},
-    { fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber },
-  );
-  assert.equal(events.length, 1);
-  assert.equal(events[0].args.agreementId, 0n);
-  assert.equal(events[0].args.totalAmount, amount);
-  assert.equal(events[0].args.startTime, startTime);
-  assert.equal(events[0].args.cliffTime, cliffTime);
-  assert.equal(events[0].args.endTime, endTime);
-  assert.equal(events[0].args.revocable, false);
-});
+      const agreement = await vesting.getAgreement(0);
+      expect(agreement.payer).to.equal(payer.address);
+      expect(agreement.beneficiary).to.equal(beneficiary.address);
+      expect(agreement.token).to.equal(tokenAddress);
+      expect(agreement.totalAmount).to.equal(amount);
+      expect(agreement.claimedAmount).to.equal(0n);
+      expect(agreement.vestedAtCancel).to.equal(0n);
+      expect(agreement.startTime).to.equal(startTime);
+      expect(agreement.cliffTime).to.equal(cliffTime);
+      expect(agreement.endTime).to.equal(endTime);
+      expect(agreement.revocable).to.equal(false);
+      expect(agreement.status).to.equal(0n);
+    });
 
-test("Antes del cliff no se devenga nada; en el cliff se devenga lo lineal desde el inicio", async () => {
-  const s = await setup();
-  const amount = parseUnits("1000", DECIMALS);
-  const { startTime, cliffTime } = await createWithCliff(s, {
-    amount,
-    startOffset: 100n,
-    cliffOffset: 30n * DAY,
-    duration: 100n * DAY,
+    it("antes del cliff no se devenga nada; en el cliff se devenga lo lineal desde el inicio", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { beneficiary, token, vesting } = ctx;
+      const { startTime, cliffTime } = await createWithCliff(ctx, {
+        amount: units("1000"),
+        startOffset: 100n,
+        cliffOffset: 30n * DAY,
+        duration: 100n * DAY,
+      });
+
+      await time.increaseTo(cliffTime - 2n);
+      expect(await vesting.vestedAmount(0)).to.equal(0n);
+      expect(await vesting.claimableAmount(0)).to.equal(0n);
+
+      await expect(
+        vesting.connect(beneficiary).claim(0),
+      ).to.be.revertedWithCustomError(vesting, "NothingToClaim");
+
+      await time.setNextBlockTimestamp(cliffTime);
+      await vesting.connect(beneficiary).claim(0);
+      expect(await token.balanceOf(beneficiary.address)).to.equal(
+        units("300"),
+      );
+
+      await time.increaseTo(startTime + 50n * DAY);
+      expect(await vesting.vestedAmount(0)).to.equal(units("500"));
+      expect(await vesting.claimableAmount(0)).to.equal(units("200"));
+    });
+
+    it("con el cliff igual al fin no se devenga nada hasta el final", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { vesting } = ctx;
+      const amount = units("1000");
+      const { endTime } = await createWithCliff(ctx, {
+        amount,
+        startOffset: 100n,
+        cliffOffset: 10n * DAY,
+        duration: 10n * DAY,
+      });
+
+      await time.increaseTo(endTime - 1n);
+      expect(await vesting.vestedAmount(0)).to.equal(0n);
+
+      await time.increaseTo(endTime);
+      expect(await vesting.vestedAmount(0)).to.equal(amount);
+    });
+
+    it("cancelar antes del cliff devuelve todo al pagador", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { payer, token, vesting } = ctx;
+      const amount = units("1000");
+      const { startTime } = await createWithCliff(ctx, {
+        amount,
+        startOffset: 100n,
+        cliffOffset: 30n * DAY,
+        duration: 100n * DAY,
+      });
+
+      const payerBefore = await token.balanceOf(payer.address);
+
+      await time.setNextBlockTimestamp(startTime + 10n * DAY);
+      await vesting.cancel(0);
+
+      const payerAfter = await token.balanceOf(payer.address);
+      expect(payerAfter - payerBefore).to.equal(amount);
+      expect(await vesting.vestedAmount(0)).to.equal(0n);
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(0n);
+    });
+
+    it("rechaza un cliff fuera del rango [inicio, fin]", async function () {
+      const { beneficiary, token, vesting } = await loadFixture(deployFixture);
+      const amount = units("1000");
+      const startTime = (await now()) + 100n;
+      const endTime = startTime + 10n * DAY;
+      const tokenAddress = await token.getAddress();
+
+      await token.approve(await vesting.getAddress(), amount);
+
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          tokenAddress,
+          amount,
+          startTime,
+          startTime - 1n,
+          endTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "InvalidCliff");
+
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          tokenAddress,
+          amount,
+          startTime,
+          endTime + 1n,
+          endTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "InvalidCliff");
+
+      expect(await vesting.nextAgreementId()).to.equal(0n);
+    });
   });
 
-  await s.travelTo(cliffTime - 2n);
-  assert.equal(await s.vesting.read.vestedAmount([0n]), 0n);
-  assert.equal(await s.vesting.read.claimableAmount([0n]), 0n);
+  describe("validaciones del struct empaquetado y del token", function () {
+    it("rechaza montos y fechas que no entran en el struct empaquetado", async function () {
+      const { beneficiary, token, vesting } = await loadFixture(deployFixture);
+      const startTime = (await now()) + 100n;
+      const endTime = startTime + DAY;
+      const tokenAddress = await token.getAddress();
 
-  await assert.rejects(
-    s.vesting.write.claim([0n], { account: s.beneficiary.account }),
-    /NothingToClaim/,
-  );
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          tokenAddress,
+          2n ** 128n,
+          startTime,
+          startTime,
+          endTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "AmountTooLarge");
 
-  await s.testClient.setNextBlockTimestamp({ timestamp: cliffTime });
-  await s.vesting.write.claim([0n], { account: s.beneficiary.account });
-  assert.equal(
-    await s.token.read.balanceOf([s.beneficiary.account.address]),
-    parseUnits("300", DECIMALS),
-  );
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          tokenAddress,
+          1n,
+          startTime,
+          startTime,
+          2n ** 48n,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "InvalidTimeRange");
+    });
 
-  await s.travelTo(startTime + 50n * DAY);
-  assert.equal(
-    await s.vesting.read.vestedAmount([0n]),
-    parseUnits("500", DECIMALS),
-  );
-  assert.equal(
-    await s.vesting.read.claimableAmount([0n]),
-    parseUnits("200", DECIMALS),
-  );
-});
+    it("soporta montos cercanos al máximo de uint128 sin desbordar", async function () {
+      const ctx = await loadFixture(deployFixture);
+      const { payer, token, vesting } = ctx;
+      const amount = 2n ** 128n - 1n;
 
-test("Con el cliff igual al fin no se devenga nada hasta el final", async () => {
-  const s = await setup();
-  const amount = parseUnits("1000", DECIMALS);
-  const { endTime } = await createWithCliff(s, {
-    amount,
-    startOffset: 100n,
-    cliffOffset: 10n * DAY,
-    duration: 10n * DAY,
+      await token.mint(payer.address, amount);
+      const { startTime, endTime } = await createWithCliff(ctx, {
+        amount,
+        startOffset: 100n,
+        cliffOffset: 0n,
+        duration: 10n * DAY,
+      });
+
+      await time.increaseTo(startTime + 5n * DAY);
+      expect(await vesting.vestedAmount(0)).to.equal(
+        (amount * (5n * DAY)) / (10n * DAY),
+      );
+
+      await time.increaseTo(endTime);
+      expect(await vesting.vestedAmount(0)).to.equal(amount);
+      expect(await token.balanceOf(await vesting.getAddress())).to.equal(
+        amount,
+      );
+    });
+
+    it("rechaza tokens que cobran comisión al transferir", async function () {
+      const { payer, beneficiary, vesting } = await loadFixture(deployFixture);
+      const feeToken = await ethers.deployContract("FeeOnTransferToken");
+      const amount = units("1000");
+      const startTime = (await now()) + 100n;
+      const endTime = startTime + 10n * DAY;
+
+      await feeToken.approve(await vesting.getAddress(), amount);
+
+      await expect(
+        vesting.createAgreement(
+          beneficiary.address,
+          await feeToken.getAddress(),
+          amount,
+          startTime,
+          startTime,
+          endTime,
+          true,
+        ),
+      ).to.be.revertedWithCustomError(vesting, "UnsupportedToken");
+
+      expect(await vesting.nextAgreementId()).to.equal(0n);
+      expect(await feeToken.balanceOf(await vesting.getAddress())).to.equal(
+        0n,
+      );
+      expect(await vesting.agreementCountByPayer(payer.address)).to.equal(0n);
+    });
   });
 
-  await s.travelTo(endTime - 1n);
-  assert.equal(await s.vesting.read.vestedAmount([0n]), 0n);
+  describe("consultas", function () {
+    it("las consultas por id inexistente revierten con AgreementNotFound", async function () {
+      const { beneficiary, vesting } = await loadFixture(deployFixture);
 
-  await s.travelTo(endTime);
-  assert.equal(await s.vesting.read.vestedAmount([0n]), amount);
-});
+      await expect(vesting.getAgreement(0)).to.be.revertedWithCustomError(
+        vesting,
+        "AgreementNotFound",
+      );
+      await expect(vesting.vestedAmount(0)).to.be.revertedWithCustomError(
+        vesting,
+        "AgreementNotFound",
+      );
+      await expect(vesting.claimableAmount(0)).to.be.revertedWithCustomError(
+        vesting,
+        "AgreementNotFound",
+      );
+      await expect(
+        vesting.connect(beneficiary).claim(0),
+      ).to.be.revertedWithCustomError(vesting, "AgreementNotFound");
+    });
 
-test("Cancelar antes del cliff devuelve todo al pagador", async () => {
-  const s = await setup();
-  const amount = parseUnits("1000", DECIMALS);
-  const { startTime } = await createWithCliff(s, {
-    amount,
-    startOffset: 100n,
-    cliffOffset: 30n * DAY,
-    duration: 100n * DAY,
+    it("listados por pagador y por beneficiario con paginación", async function () {
+      const { payer, beneficiary, other, token, vesting } =
+        await loadFixture(deployFixture);
+      const amount = units("10");
+      const startTime = (await now()) + 100n;
+      const endTime = startTime + DAY;
+      const tokenAddress = await token.getAddress();
+
+      await token.approve(await vesting.getAddress(), amount * 3n);
+
+      for (const to of [beneficiary.address, other.address, beneficiary.address]) {
+        await vesting.createAgreement(
+          to,
+          tokenAddress,
+          amount,
+          startTime,
+          startTime,
+          endTime,
+          true,
+        );
+      }
+
+      const ids = async (
+        method: "getAgreementIdsByPayer" | "getAgreementIdsByBeneficiary",
+        who: string,
+        offset: bigint,
+        limit: bigint,
+      ) => [...(await vesting[method](who, offset, limit))];
+
+      expect(await vesting.agreementCountByPayer(payer.address)).to.equal(3n);
+      expect(
+        await vesting.agreementCountByBeneficiary(beneficiary.address),
+      ).to.equal(2n);
+      expect(await vesting.agreementCountByBeneficiary(other.address)).to.equal(
+        1n,
+      );
+      expect(await vesting.agreementCountByPayer(other.address)).to.equal(0n);
+
+      expect(await ids("getAgreementIdsByPayer", payer.address, 0n, 10n)).to.deep.equal([0n, 1n, 2n]);
+      expect(
+        await ids("getAgreementIdsByBeneficiary", beneficiary.address, 0n, 10n),
+      ).to.deep.equal([0n, 2n]);
+      expect(
+        await ids("getAgreementIdsByBeneficiary", other.address, 0n, 10n),
+      ).to.deep.equal([1n]);
+
+      expect(await ids("getAgreementIdsByPayer", payer.address, 1n, 1n)).to.deep.equal([1n]);
+      expect(await ids("getAgreementIdsByPayer", payer.address, 2n, 10n)).to.deep.equal([2n]);
+      expect(await ids("getAgreementIdsByPayer", payer.address, 3n, 10n)).to.deep.equal([]);
+      expect(await ids("getAgreementIdsByPayer", payer.address, 0n, 0n)).to.deep.equal([]);
+      expect(
+        await ids("getAgreementIdsByPayer", payer.address, 1n, 2n ** 256n - 1n),
+      ).to.deep.equal([1n, 2n]);
+      expect(await ids("getAgreementIdsByPayer", other.address, 0n, 10n)).to.deep.equal([]);
+    });
   });
-
-  const payerBefore = await s.token.read.balanceOf([s.payer.account.address]);
-
-  await s.testClient.setNextBlockTimestamp({ timestamp: startTime + 10n * DAY });
-  await s.vesting.write.cancel([0n]);
-
-  const payerAfter = await s.token.read.balanceOf([s.payer.account.address]);
-  assert.equal(payerAfter - payerBefore, amount);
-  assert.equal(await s.vesting.read.vestedAmount([0n]), 0n);
-  assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
-});
-
-test("Rechaza un cliff fuera del rango [inicio, fin]", async () => {
-  const s = await setup();
-  const amount = parseUnits("1000", DECIMALS);
-  const startTime = s.now + 100n;
-  const endTime = startTime + 10n * DAY;
-
-  await s.token.write.approve([s.vesting.address, amount]);
-
-  await assert.rejects(
-    s.vesting.write.createAgreement([
-      s.beneficiary.account.address,
-      s.token.address,
-      amount,
-      startTime,
-      startTime - 1n,
-      endTime,
-      true,
-    ]),
-    /InvalidCliff/,
-  );
-
-  await assert.rejects(
-    s.vesting.write.createAgreement([
-      s.beneficiary.account.address,
-      s.token.address,
-      amount,
-      startTime,
-      endTime + 1n,
-      endTime,
-      true,
-    ]),
-    /InvalidCliff/,
-  );
-
-  assert.equal(await s.vesting.read.nextAgreementId(), 0n);
-});
-
-test("Rechaza montos y fechas que no entran en el struct empaquetado", async () => {
-  const s = await setup();
-  const startTime = s.now + 100n;
-  const endTime = startTime + DAY;
-
-  await assert.rejects(
-    s.vesting.write.createAgreement([
-      s.beneficiary.account.address,
-      s.token.address,
-      2n ** 128n,
-      startTime,
-      startTime,
-      endTime,
-      true,
-    ]),
-    /AmountTooLarge/,
-  );
-
-  await assert.rejects(
-    s.vesting.write.createAgreement([
-      s.beneficiary.account.address,
-      s.token.address,
-      1n,
-      startTime,
-      startTime,
-      2n ** 48n,
-      true,
-    ]),
-    /InvalidTimeRange/,
-  );
-});
-
-test("Rechaza tokens que cobran comisión al transferir", async () => {
-  const s = await setup();
-  const feeToken = await s.viem.deployContract("FeeOnTransferToken");
-  const amount = parseUnits("1000", DECIMALS);
-  const startTime = s.now + 100n;
-  const endTime = startTime + 10n * DAY;
-
-  await feeToken.write.approve([s.vesting.address, amount]);
-
-  await assert.rejects(
-    s.vesting.write.createAgreement([
-      s.beneficiary.account.address,
-      feeToken.address,
-      amount,
-      startTime,
-      startTime,
-      endTime,
-      true,
-    ]),
-    /UnsupportedToken/,
-  );
-
-  assert.equal(await s.vesting.read.nextAgreementId(), 0n);
-  assert.equal(await feeToken.read.balanceOf([s.vesting.address]), 0n);
-  assert.equal(
-    await s.vesting.read.agreementCountByPayer([s.payer.account.address]),
-    0n,
-  );
-});
-
-test("Las consultas por id inexistente revierten con AgreementNotFound", async () => {
-  const s = await setup();
-
-  await assert.rejects(s.vesting.read.getAgreement([0n]), /AgreementNotFound/);
-  await assert.rejects(s.vesting.read.vestedAmount([0n]), /AgreementNotFound/);
-  await assert.rejects(
-    s.vesting.read.claimableAmount([0n]),
-    /AgreementNotFound/,
-  );
-  await assert.rejects(
-    s.vesting.write.claim([0n], { account: s.beneficiary.account }),
-    /AgreementNotFound/,
-  );
-});
-
-test("Listados por pagador y por beneficiario con paginación", async () => {
-  const s = await setup();
-  const amount = parseUnits("10", DECIMALS);
-
-  await s.token.write.approve([s.vesting.address, amount * 3n]);
-  const startTime = s.now + 100n;
-  const endTime = startTime + DAY;
-
-  for (const to of [
-    s.beneficiary.account.address,
-    s.other.account.address,
-    s.beneficiary.account.address,
-  ]) {
-    await s.vesting.write.createAgreement([
-      to,
-      s.token.address,
-      amount,
-      startTime,
-      startTime,
-      endTime,
-      true,
-    ]);
-  }
-
-  const payerAddress = s.payer.account.address;
-  const beneficiaryAddress = s.beneficiary.account.address;
-  const otherAddress = s.other.account.address;
-
-  assert.equal(await s.vesting.read.agreementCountByPayer([payerAddress]), 3n);
-  assert.equal(
-    await s.vesting.read.agreementCountByBeneficiary([beneficiaryAddress]),
-    2n,
-  );
-  assert.equal(
-    await s.vesting.read.agreementCountByBeneficiary([otherAddress]),
-    1n,
-  );
-  assert.equal(await s.vesting.read.agreementCountByPayer([otherAddress]), 0n);
-
-  assert.deepEqual(
-    await s.vesting.read.getAgreementIdsByPayer([payerAddress, 0n, 10n]),
-    [0n, 1n, 2n],
-  );
-  assert.deepEqual(
-    await s.vesting.read.getAgreementIdsByBeneficiary([
-      beneficiaryAddress,
-      0n,
-      10n,
-    ]),
-    [0n, 2n],
-  );
-  assert.deepEqual(
-    await s.vesting.read.getAgreementIdsByBeneficiary([otherAddress, 0n, 10n]),
-    [1n],
-  );
-
-  assert.deepEqual(
-    await s.vesting.read.getAgreementIdsByPayer([payerAddress, 1n, 1n]),
-    [1n],
-  );
-  assert.deepEqual(
-    await s.vesting.read.getAgreementIdsByPayer([payerAddress, 2n, 10n]),
-    [2n],
-  );
-  assert.deepEqual(
-    await s.vesting.read.getAgreementIdsByPayer([payerAddress, 3n, 10n]),
-    [],
-  );
-  assert.deepEqual(
-    await s.vesting.read.getAgreementIdsByPayer([payerAddress, 0n, 0n]),
-    [],
-  );
-  assert.deepEqual(
-    await s.vesting.read.getAgreementIdsByPayer([payerAddress, 1n, 2n ** 256n - 1n]),
-    [1n, 2n],
-  );
-  assert.deepEqual(
-    await s.vesting.read.getAgreementIdsByPayer([otherAddress, 0n, 10n]),
-    [],
-  );
-});
-
-test("Soporta montos cercanos al máximo de uint128 sin desbordar", async () => {
-  const s = await setup();
-  const amount = 2n ** 128n - 1n;
-
-  await s.token.write.mint([s.payer.account.address, amount]);
-  const { startTime, endTime } = await createWithCliff(s, {
-    amount,
-    startOffset: 100n,
-    cliffOffset: 0n,
-    duration: 10n * DAY,
-  });
-
-  await s.travelTo(startTime + 5n * DAY);
-  assert.equal(
-    await s.vesting.read.vestedAmount([0n]),
-    (amount * (5n * DAY)) / (10n * DAY),
-  );
-
-  await s.travelTo(endTime);
-  assert.equal(await s.vesting.read.vestedAmount([0n]), amount);
-  assert.equal(await s.token.read.balanceOf([s.vesting.address]), amount);
 });
