@@ -32,6 +32,7 @@ test("Debe crear un acuerdo y bloquear los tokens", async () => {
     token.address,
     amount,
     startTime,
+    startTime,
     endTime,
     true,
   ]);
@@ -42,17 +43,17 @@ test("Debe crear un acuerdo y bloquear los tokens", async () => {
 
   assert.equal(receipt.status, "success");
 
-  const agreement = await vesting.read.agreements([0n]);
+  const agreement = await vesting.read.getAgreement([0n]);
 
 
-  assert.equal(agreement[0].toLowerCase(), payer.account.address.toLowerCase());
+  assert.equal(agreement.payer.toLowerCase(), payer.account.address.toLowerCase());
 
   assert.equal(
-    agreement[1].toLowerCase(),
+    agreement.beneficiary.toLowerCase(),
     beneficiary.account.address.toLowerCase(),
   );
 
-  assert.equal(agreement[3], amount);
+  assert.equal(agreement.totalAmount, amount);
 
   const balance = await token.read.balanceOf([vesting.address]);
 
@@ -86,6 +87,7 @@ test("Debe rechazar acuerdos inválidos", async () => {
       token.address,
       amount,
       startTime,
+      startTime,
       endTime,
       true,
     ]),
@@ -97,6 +99,7 @@ test("Debe rechazar acuerdos inválidos", async () => {
       beneficiary.account.address,
       token.address,
       0n,
+      startTime,
       startTime,
       endTime,
       true,
@@ -111,6 +114,7 @@ test("Debe rechazar acuerdos inválidos", async () => {
       amount,
       startTime,
       startTime,
+      startTime,
       true,
     ]),
   );
@@ -121,6 +125,7 @@ test("Debe rechazar acuerdos inválidos", async () => {
       beneficiary.account.address,
       token.address,
       amount,
+      endTime,
       endTime,
       startTime,
       true,
@@ -134,6 +139,7 @@ test("Debe rechazar acuerdos inválidos", async () => {
       zeroAddress,
       amount,
       startTime,
+      startTime,
       endTime,
       true,
     ]),
@@ -145,6 +151,7 @@ test("Debe rechazar acuerdos inválidos", async () => {
       beneficiary.account.address,
       token.address,
       amount,
+      startTime,
       startTime,
       endTime,
       true,
@@ -180,6 +187,7 @@ test("Debe calcular correctamente el vesting lineal", async () => {
     beneficiary.account.address,
     token.address,
     amount,
+    startTime,
     startTime,
     endTime,
     true,
@@ -247,6 +255,7 @@ test("Debe permitir reclamos parciales y evitar dobles retiros", async () => {
     token.address,
     amount,
     startTime,
+    startTime,
     endTime,
     true,
   ]);
@@ -281,8 +290,8 @@ test("Debe permitir reclamos parciales y evitar dobles retiros", async () => {
 
   assert.equal(beneficiaryBalance, half);
 
-  const agreement = await vesting.read.agreements([0n]);
-  assert.equal(agreement[6], half);
+  const agreement = await vesting.read.getAgreement([0n]);
+  assert.equal(agreement.claimedAmount, half);
 
   await assert.rejects(
     vesting.write.claim([0n], {
@@ -308,8 +317,8 @@ test("Debe permitir reclamos parciales y evitar dobles retiros", async () => {
 
   assert.equal(finalBalance, amount);
 
-  const finalAgreement = await vesting.read.agreements([0n]);
-  assert.equal(finalAgreement[8], 1);
+  const finalAgreement = await vesting.read.getAgreement([0n]);
+  assert.equal(finalAgreement.status, 1);
 
   await assert.rejects(
     vesting.write.claim([0n], {
@@ -353,6 +362,7 @@ async function setupAgreement(
     token.address,
     amount,
     startTime,
+    startTime,
     endTime,
     revocable,
   ]);
@@ -367,6 +377,7 @@ async function setupAgreement(
     vesting,
     amount,
     duration,
+    startTime,
     startTime,
     endTime,
   };
@@ -389,9 +400,9 @@ test("Cancelación válida: devuelve lo no devengado al pagador y congela lo dev
 
   assert.equal(await s.token.read.balanceOf([s.vesting.address]), half);
 
-  const agreement = await s.vesting.read.agreements([0n]);
-  assert.equal(agreement[8], 2); // Status.Cancelled
-  assert.equal(agreement[9], half); // vestedAtCancel
+  const agreement = await s.vesting.read.getAgreement([0n]);
+  assert.equal(agreement.status, 2);
+  assert.equal(agreement.vestedAtCancel, half);
 
   const events = await s.vesting.getEvents.AgreementCancelled(
     {},
@@ -430,9 +441,9 @@ test("Tras cancelar, el beneficiario reclama lo devengado y el devengado ya no c
     await s.token.read.balanceOf([s.beneficiary.account.address]),
     half,
   );
-  const agreement = await s.vesting.read.agreements([0n]);
-  assert.equal(agreement[8], 2);
-  assert.equal(agreement[6], half); // claimedAmount
+  const agreement = await s.vesting.read.getAgreement([0n]);
+  assert.equal(agreement.status, 2);
+  assert.equal(agreement.claimedAmount, half);
 
   assert.equal(await s.token.read.balanceOf([s.vesting.address]), 0n);
 
@@ -498,7 +509,7 @@ test("Redondeo al cancelar: reclamado + devuelto = depositado, sin retirar de m�
 
   const refund =
     (await s.token.read.balanceOf([s.payer.account.address])) - payerBefore;
-  assert.equal(refund, 67n); // el redondeo favorece al pagador, nunca al beneficiario
+  assert.equal(refund, 67n);
   assert.equal(await s.vesting.read.vestedAmount([0n]), 33n);
 
   await s.vesting.write.claim([0n], { account: s.beneficiary.account });
@@ -526,8 +537,8 @@ test("Solo el pagador puede cancelar", async () => {
     /Unauthorized/,
   );
 
-  const agreement = await s.vesting.read.agreements([0n]);
-  assert.equal(agreement[8], 0); // sigue Active
+  const agreement = await s.vesting.read.getAgreement([0n]);
+  assert.equal(agreement.status, 0);
 });
 
 test("No se puede cancelar un acuerdo no revocable", async () => {
@@ -539,8 +550,8 @@ test("No se puede cancelar un acuerdo no revocable", async () => {
 
   await assert.rejects(s.vesting.write.cancel([0n]), /NotRevocable/);
 
-  const agreement = await s.vesting.read.agreements([0n]);
-  assert.equal(agreement[8], 0); // sigue Active
+  const agreement = await s.vesting.read.getAgreement([0n]);
+  assert.equal(agreement.status, 0);
   assert.equal(await s.token.read.balanceOf([s.vesting.address]), s.amount);
 });
 
