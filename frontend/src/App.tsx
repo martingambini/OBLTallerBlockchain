@@ -1,7 +1,15 @@
+import { Header } from "./components/Header";
+import { RequireWallet } from "./components/RequireWallet";
+
 export function App() {
   return (
-    <main className="content">
-      <h1>Vesting de pagos</h1>
-    </main>
+    <>
+      <Header />
+      <main className="content">
+        <RequireWallet>
+          <h1>Vesting de pagos</h1>
+        </RequireWallet>
+      </main>
+    </>
   );
 }
