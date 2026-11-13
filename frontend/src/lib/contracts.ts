@@ -63,7 +63,7 @@ export async function loadTokenInfo(
 
 export const STATUS_LABELS = ["Activo", "Completado", "Cancelado"] as const;
 
-export interface AgreementView {
+export interface Agreement {
   id: bigint;
   payer: string;
   beneficiary: string;
@@ -76,8 +76,54 @@ export interface AgreementView {
   totalAmount: bigint;
   claimedAmount: bigint;
   vestedAtCancel: bigint;
+}
+
+export interface AgreementView extends Agreement {
   vested: bigint;
   claimable: bigint;
+}
+
+export async function loadAgreementBase(
+  vesting: Contract,
+  id: bigint,
+): Promise<Agreement> {
+  const raw = await vesting.getAgreement(id);
+
+  return {
+    id,
+    payer: raw.payer,
+    beneficiary: raw.beneficiary,
+    token: raw.token,
+    startTime: BigInt(raw.startTime),
+    cliffTime: BigInt(raw.cliffTime),
+    endTime: BigInt(raw.endTime),
+    revocable: raw.revocable,
+    status: Number(raw.status),
+    totalAmount: BigInt(raw.totalAmount),
+    claimedAmount: BigInt(raw.claimedAmount),
+    vestedAtCancel: BigInt(raw.vestedAtCancel),
+  };
+}
+
+export async function loadAgreementIds(
+  vesting: Contract,
+  role: "payer" | "beneficiary",
+  address: string,
+): Promise<bigint[]> {
+  const method =
+    role === "payer" ? "getAgreementIdsByPayer" : "getAgreementIdsByBeneficiary";
+  const pageSize = 50n;
+  const ids: bigint[] = [];
+  let offset = 0n;
+
+  for (;;) {
+    const page: bigint[] = await vesting[method](address, offset, pageSize);
+    ids.push(...page.map((id) => BigInt(id)));
+    if (BigInt(page.length) < pageSize) {
+      return ids;
+    }
+    offset += pageSize;
+  }
 }
 
 export async function loadAgreement(
