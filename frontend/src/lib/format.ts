@@ -70,6 +70,21 @@ export function toDateTimeLocal(timestamp: bigint | number): string {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
 
+export function formatDuration(totalSeconds: bigint): string {
+  const seconds = totalSeconds < 0n ? 0n : totalSeconds;
+  const days = seconds / 86400n;
+  const hours = (seconds % 86400n) / 3600n;
+  const minutes = (seconds % 3600n) / 60n;
+
+  if (days > 0n) {
+    return `${days} d ${hours} h`;
+  }
+  if (hours > 0n) {
+    return `${hours} h ${minutes} min`;
+  }
+  return `${minutes} min ${seconds % 60n} s`;
+}
+
 export function percent(part: bigint, total: bigint): number {
   if (total === 0n) {
     return 0;

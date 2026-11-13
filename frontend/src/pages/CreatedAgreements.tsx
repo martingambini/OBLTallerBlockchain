@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { CancelSummary } from "../components/CancelSummary";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ProgressBar } from "../components/ProgressBar";
 import { StatusBadge } from "../components/StatusBadge";
@@ -7,7 +8,7 @@ import { TxStatus } from "../components/TxStatus";
 import { useAgreements } from "../hooks/useAgreements";
 import { useChainTime } from "../hooks/useChainTime";
 import { useTransaction } from "../hooks/useTransaction";
-import { getVesting, type Agreement, type TokenInfo } from "../lib/contracts";
+import { getVesting } from "../lib/contracts";
 import {
   formatAmount,
   formatDateTime,
@@ -24,6 +25,7 @@ export function CreatedAgreements() {
   const state = useAgreements("payer");
   const now = useChainTime();
   const tx = useTransaction();
+  const navigate = useNavigate();
 
   const [pendingId, setPendingId] = useState<bigint | null>(null);
 
@@ -92,7 +94,11 @@ export function CreatedAgreements() {
                 const { symbol, decimals } = tokenMeta(state.tokens, agreement.token);
                 const vested = vestedAt(agreement, now);
                 return (
-                  <tr key={agreement.id.toString()}>
+                  <tr
+                    key={agreement.id.toString()}
+                    className="clickable"
+                    onClick={() => navigate(`/agreements/${agreement.id}`)}
+                  >
                     <td>
                       <Link to={`/agreements/${agreement.id}`}>#{agreement.id.toString()}</Link>
                     </td>
@@ -126,7 +132,10 @@ export function CreatedAgreements() {
                       {canCancel(agreement, now) && (
                         <button
                           className="danger small"
-                          onClick={() => setPendingId(agreement.id)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setPendingId(agreement.id);
+                          }}
                           disabled={tx.busy}
                         >
                           Cancelar
@@ -158,43 +167,5 @@ export function CreatedAgreements() {
         )}
       </ConfirmDialog>
     </section>
-  );
-}
-
-function CancelSummary({
-  agreement,
-  now,
-  tokens,
-}: {
-  agreement: Agreement;
-  now: bigint;
-  tokens: Record<string, TokenInfo>;
-}) {
-  const { symbol, decimals } = tokenMeta(tokens, agreement.token);
-  const vested = vestedAt(agreement, now);
-  const refund = agreement.totalAmount - vested;
-
-  return (
-    <>
-      <span>
-        Para el beneficiario ({shortAddress(agreement.beneficiary)}) queda lo ya
-        devengado:{" "}
-        <strong>
-          ≈ {formatAmount(vested, decimals)} {symbol}
-        </strong>
-        .
-      </span>
-      <span>
-        A tu cuenta vuelve lo no devengado:{" "}
-        <strong>
-          ≈ {formatAmount(refund, decimals)} {symbol}
-        </strong>
-        .
-      </span>
-      <span>
-        Los montos son una estimación: el contrato calcula con la hora del
-        bloque en que se confirme. Esta acción no se puede deshacer.
-      </span>
-    </>
   );
 }
