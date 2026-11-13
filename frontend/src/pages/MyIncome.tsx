@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { ProgressBar } from "../components/ProgressBar";
 import { StatusBadge } from "../components/StatusBadge";
 import { TxStatus } from "../components/TxStatus";
@@ -22,6 +22,7 @@ export function MyIncome() {
   const state = useAgreements("beneficiary");
   const now = useChainTime();
   const tx = useTransaction();
+  const navigate = useNavigate();
 
   async function onClaim(id: bigint) {
     const vesting = getVesting(chainId, signer);
@@ -83,7 +84,11 @@ export function MyIncome() {
                 const vested = vestedAt(agreement, now);
                 const claimable = claimableAt(agreement, now);
                 return (
-                  <tr key={agreement.id.toString()}>
+                  <tr
+                    key={agreement.id.toString()}
+                    className="clickable"
+                    onClick={() => navigate(`/agreements/${agreement.id}`)}
+                  >
                     <td>
                       <Link to={`/agreements/${agreement.id}`}>#{agreement.id.toString()}</Link>
                     </td>
@@ -120,7 +125,10 @@ export function MyIncome() {
                     <td>
                       <button
                         className="small"
-                        onClick={() => onClaim(agreement.id)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onClaim(agreement.id);
+                        }}
                         disabled={tx.busy || claimable === 0n}
                       >
                         Reclamar
