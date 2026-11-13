@@ -42,6 +42,17 @@ export function formatDateTime(timestamp: bigint | number): string {
   });
 }
 
+export function formatDateTimeCompact(timestamp: bigint | number): string {
+  return new Date(Number(timestamp) * 1000).toLocaleString("es-UY", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
 export function toTimestamp(dateTimeLocal: string): bigint | null {
   if (!dateTimeLocal) {
     return null;
