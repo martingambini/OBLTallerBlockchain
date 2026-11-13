@@ -1,7 +1,11 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { isAddress, ZeroAddress } from "ethers";
+import { Link } from "react-router-dom";
+import { isAddress, parseUnits, ZeroAddress, type TransactionReceipt } from "ethers";
+import { TxStatus } from "../components/TxStatus";
 import { getAddresses } from "../config/networks";
 import { useTokenInfo } from "../hooks/useTokenInfo";
+import { useTransaction } from "../hooks/useTransaction";
+import { getErc20, getMockToken, getVesting, vestingInterface } from "../lib/contracts";
 import {
   formatAmount,
   formatDateTime,
@@ -16,6 +20,7 @@ const UINT128_MAX = 2n ** 128n - 1n;
 const UINT48_MAX = 2n ** 48n - 1n;
 const UNLIMITED_ALLOWANCE = 2n ** 200n;
 const DAY_SECONDS = 24 * 60 * 60;
+const FAUCET_AMOUNT = "10000";
 
 function defaultStart(): string {
   const now = Math.floor(Date.now() / 1000);
@@ -27,8 +32,28 @@ function defaultEnd(): string {
   return toDateTimeLocal(now - (now % 60) + 30 * DAY_SECONDS);
 }
 
+function createdAgreementId(
+  receipt: TransactionReceipt,
+  vestingAddress: string,
+): bigint | null {
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== vestingAddress.toLowerCase()) {
+      continue;
+    }
+    try {
+      const parsed = vestingInterface.parseLog(log);
+      if (parsed?.name === "AgreementCreated") {
+        return BigInt(parsed.args.agreementId);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export function CreateAgreement() {
-  const { chainId } = useWallet();
+  const { signer, account, chainId } = useWallet();
   const addresses = getAddresses(chainId);
 
   const [beneficiary, setBeneficiary] = useState("");
@@ -38,10 +63,14 @@ export function CreateAgreement() {
   const [cliff, setCliff] = useState("");
   const [end, setEnd] = useState(defaultEnd);
   const [revocable, setRevocable] = useState(true);
+  const [createdId, setCreatedId] = useState<bigint | null>(null);
 
   const tokenState = useTokenInfo(token);
+  const approveTx = useTransaction();
+  const createTx = useTransaction();
+  const mintTx = useTransaction();
 
-  const busy = false;
+  const busy = approveTx.busy || createTx.busy || mintTx.busy;
   const decimals = tokenState.status === "ready" ? tokenState.info.decimals : null;
   const symbol = tokenState.status === "ready" ? tokenState.info.symbol : "";
 
@@ -129,8 +158,75 @@ export function CreateAgreement() {
     validation.totalAmount !== null &&
     tokenState.allowance < validation.totalAmount;
 
-  function onSubmit(event: FormEvent) {
+  const isTestToken =
+    addresses !== null &&
+    token.trim().toLowerCase() === addresses.MockToken.toLowerCase();
+
+  async function onSubmit(event: FormEvent) {
     event.preventDefault();
+    if (
+      !signer ||
+      !addresses ||
+      !validation.valid ||
+      tokenState.status !== "ready" ||
+      validation.totalAmount === null ||
+      validation.startTs === null ||
+      validation.endTs === null ||
+      validation.cliffTs === null
+    ) {
+      return;
+    }
+
+    const total = validation.totalAmount;
+    const tokenAddress = token.trim();
+    setCreatedId(null);
+    approveTx.reset();
+    createTx.reset();
+
+    if (needsApproval) {
+      const approved = await approveTx.run(
+        `Aprobar ${formatAmount(total, tokenState.info.decimals)} ${tokenState.info.symbol}`,
+        () => getErc20(tokenAddress, signer).approve(addresses.Vesting, total),
+      );
+      if (!approved) {
+        return;
+      }
+    }
+
+    const vesting = getVesting(chainId, signer);
+    if (!vesting) {
+      return;
+    }
+
+    const receipt = await createTx.run("Crear acuerdo", () =>
+      vesting.createAgreement(
+        beneficiary.trim(),
+        tokenAddress,
+        total,
+        validation.startTs!,
+        validation.cliffTs!,
+        validation.endTs!,
+        revocable,
+      ),
+    );
+
+    if (receipt) {
+      setCreatedId(createdAgreementId(receipt, addresses.Vesting));
+    }
+  }
+
+  async function onMint() {
+    if (!signer || !account || decimals === null) {
+      return;
+    }
+    const mockToken = getMockToken(chainId, signer);
+    if (!mockToken) {
+      return;
+    }
+    mintTx.reset();
+    await mintTx.run(`Obtener ${FAUCET_AMOUNT} ${symbol} de prueba`, () =>
+      mockToken.mint(account, parseUnits(FAUCET_AMOUNT, decimals)),
+    );
   }
 
   function onReset() {
@@ -140,6 +236,9 @@ export function CreateAgreement() {
     setCliff("");
     setEnd(defaultEnd());
     setRevocable(true);
+    setCreatedId(null);
+    approveTx.reset();
+    createTx.reset();
   }
 
   const errors = validation.errors;
@@ -195,6 +294,16 @@ export function CreateAgreement() {
                 disabled={busy}
               >
                 Usar token de prueba
+              </button>
+            )}
+            {isTestToken && tokenState.status === "ready" && (
+              <button
+                type="button"
+                className="secondary"
+                onClick={onMint}
+                disabled={busy}
+              >
+                Obtener {FAUCET_AMOUNT} {tokenState.info.symbol} de prueba
               </button>
             )}
           </div>
@@ -331,6 +440,22 @@ export function CreateAgreement() {
         </div>
       </form>
 
+      <TxStatus state={mintTx.state} />
+      <TxStatus state={approveTx.state} />
+      <TxStatus state={createTx.state} />
+
+      {createTx.state.status === "confirmed" && (
+        <div className="success">
+          {createdId !== null ? (
+            <>
+              Acuerdo #{createdId.toString()} creado.{" "}
+              <Link to={`/agreements/${createdId.toString()}`}>Ver detalle</Link>
+            </>
+          ) : (
+            <>Acuerdo creado.</>
+          )}
+        </div>
+      )}
     </section>
   );
 }
