@@ -25,6 +25,14 @@
   font-weight: 600;
 }
 
+.table tbody tr.clickable {
+  cursor: pointer;
+}
+
+.table tbody tr.clickable:hover {
+  background: var(--bg);
+}
+
 .table tr:last-child td {
   border-bottom: 0;
 }
