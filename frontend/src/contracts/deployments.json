@@ -2,5 +2,9 @@
   "31337": {
     "Vesting": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
     "MockToken": "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+  },
+  "11155111": {
+    "Vesting": "0x7d5e4103Fb09c70f205D0E986620b0bFC90eE7dB",
+    "MockToken": "0x5C760d8408278daa1CA1F4dEC1E73425dB0D1Aef"
   }
 }
