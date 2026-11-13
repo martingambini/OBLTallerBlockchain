@@ -6,6 +6,7 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "coverage": "hardhat test --coverage",
+    "gas": "hardhat test --gas-stats",
     "node": "hardhat node",
     "deploy:local": "hardhat ignition deploy ignition/modules/Vesting.ts --network localhost --reset && hardhat run scripts/export-contracts.ts --network localhost",
     "seed": "hardhat run scripts/seed.ts --network localhost",
