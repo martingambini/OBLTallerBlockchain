@@ -1,0 +1,174 @@
+.detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 4px;
+}
+
+.detail-head h1 {
+  margin: 0;
+}
+
+.back {
+  display: inline-block;
+  margin-bottom: 12px;
+  color: var(--primary);
+}
+
+.card {
+  margin-top: 16px;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px 24px;
+  margin: 0;
+}
+
+.facts div {
+  min-width: 0;
+}
+
+.facts dt {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.facts dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.role {
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.bar-block + .bar-block {
+  margin-top: 16px;
+}
+
+.bar-label {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+  font-size: 0.9rem;
+}
+
+.bar-label span:last-child {
+  color: var(--muted);
+}
+
+.time-bar {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: visible;
+}
+
+.time-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+.cliff-mark {
+  position: absolute;
+  top: -4px;
+  width: 2px;
+  height: 20px;
+  background: var(--warn);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.bar-block .progress {
+  max-width: none;
+  height: 12px;
+}
+
+.actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.history {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.history th,
+.history td {
+  padding: 8px 6px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.history th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.history tr:last-child td {
+  border-bottom: 0;
+}
+
+.event {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.event.created {
+  background: var(--ok-bg);
+  color: var(--ok);
+  border-color: transparent;
+}
+
+.event.claimed {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-color: transparent;
+}
+
+.event.cancelled {
+  background: var(--error-bg);
+  color: var(--error);
+  border-color: transparent;
+}
+
+.facts .mono {
+  font-size: 0.75rem;
+}
